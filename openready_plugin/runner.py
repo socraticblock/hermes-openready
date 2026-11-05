@@ -117,6 +117,12 @@ def run(
     args = tuple(str(part) for part in argv)
     if not args:
         return RunResult(args, 127, "", "", missing=True, detail="empty argv")
+    # A missing working directory raises FileNotFoundError from Popen, which is
+    # indistinguishable from a missing binary unless it is checked first. Blaming
+    # the executable sends the caller to reinstall a tool that is installed.
+    if cwd is not None and not os.path.isdir(str(cwd)):
+        return RunResult(args, 64, "", "", missing=True,
+                         detail=f"directory does not exist: {cwd}")
     try:
         proc = subprocess.Popen(
             list(args),
