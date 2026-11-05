@@ -1,0 +1,52 @@
+name: hermes-openready
+version: "0.1.0"
+description: >
+  Open-Ready as Hermes tools: prepare an open-source release candidate from a private
+  repository, verify it, and refuse to publish it. Registers five tools that only read or
+  produce a candidate, plus a pre_tool_call guard that blocks or escalates repository
+  visibility changes until the owner has approved that exact candidate digest. The plugin
+  has no publish path of its own.
+author: Socraticblock
+license: MIT
+requires_hermes: ">=0.20"
+provides_tools:
+  - openready_status
+  - openready_doctor
+  - openready_candidate
+  - openready_verify
+  - openready_gate
+provides_hooks:
+  - pre_tool_call
+config_schema:
+  openready_bin:
+    type: str
+    required: false
+    description: "Path or name of the Open-Ready console script (default: openready)."
+  openready_python:
+    type: str
+    required: false
+    description: "Interpreter that can import the openready package, used for the read-only publisher check (default: python3)."
+  timeout_seconds:
+    type: int
+    required: false
+    description: "Upper bound for one Open-Ready command (default: 120)."
+  approval_timeout_seconds:
+    type: int
+    required: false
+    description: "Upper bound for the read-only approval check run from the guard (default: 20)."
+  candidate_dir:
+    type: str
+    required: false
+    description: "Candidate directory relative to the repository (default: .openready-candidate)."
+  licence:
+    type: str
+    required: false
+    description: "SPDX licence identifier the approval must be bound to (default: MIT)."
+  destination:
+    type: str
+    required: false
+    description: "Override the destination URL recorded in an approval; by default it is derived from the command target or the repository's origin remote."
+  guard_enabled:
+    type: bool
+    required: false
+    description: "Set false to disable the pre_tool_call publish guard for this profile (default: true)."
