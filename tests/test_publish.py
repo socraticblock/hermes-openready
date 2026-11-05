@@ -94,6 +94,11 @@ BLOCK_SHAPES = [
     ),
     # `private: false` is the other spelling of a visibility flip
     ("gh api -X PATCH /repos/a/b -f private=false", API_VISIBILITY),
+    # a field value the guard cannot evaluate is not "no visibility change"
+    ("gh api -X PATCH repos/o/r -f visibility=$(echo public)", API_VISIBILITY),
+    ("gh api -X PATCH repos/o/r -f visibility=$VIS", API_VISIBILITY),
+    ('gh api -X PATCH repos/o/r -f visibility="$VIS"', API_VISIBILITY),
+    ("gh api -X PATCH repos/o/r -f private=$FLAG", API_VISIBILITY),
     (
         'curl -X PATCH https://api.github.com/repos/a/b -d \'{"private":false}\'',
         API_VISIBILITY,
@@ -137,6 +142,9 @@ BLOCK_SHAPES = [
 PASS_SHAPES = [
     "gh repo view socraticblock/example",
     "gh repo edit --visibility private",
+    "gh api -X PATCH repos/o/r -f visibility=private",
+    "gh api -X PATCH repos/o/r -f private=true",
+    "gh api -X PATCH repos/o/r -f description=hello",
     "gh repo edit socraticblock/example --description hello",
     "gh repo create example --private",
     "gh pr create --title x --body y",

@@ -6,8 +6,9 @@ publish it.
 
 The plugin is the Hermes-facing half of [Open-Ready](https://github.com/socraticblock/open-source-ready).
 It registers five tools and one `pre_tool_call` guard. There is no publish path in this
-package: no push, no visibility change, no upload. The only mutation any tool can cause is
-Open-Ready writing a candidate directory.
+package: no push, no visibility change, no upload. The only files any tool writes are
+Open-Ready's own outputs — a candidate directory, and, if the caller asks for one, a
+release packet at a path it names.
 
 ## The problem it solves
 
@@ -79,6 +80,7 @@ repository's public surface:
 | API equivalent | `gh api -X PATCH /repos/owner/repo -f visibility=public` |
 | REST create (defaults public) | `gh api /user/repos -f name=x` — silence means public |
 | REST visibility flip | `gh api -X PATCH /repos/o/r -f private=false` |
+| REST visibility, value the guard cannot read | `gh api -X PATCH /repos/o/r -f visibility=$(echo public)` |
 | direct REST | `curl -X PATCH https://api.github.com/repos/owner/repo -d '{"visibility":"public"}'` |
 | behind a wrapper | `sudo …`, `timeout 30 …`, `env -S "…"`, `bash -lc "…"`, `setsid …`, `script -qec "…"` |
 | behind shell syntax | `time gh …`, `! gh …`, `{ gh …; }`, `(gh …)`, `then gh …` |
@@ -138,7 +140,7 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **162 passed** — grammar table (63 publish shapes, 35 non-publish shapes),
+- `pytest`: **169 passed** — grammar table (67 publish shapes, 38 non-publish shapes),
   decision table, runner failure modes (including a grandchild holding the pipe open),
   settings precedence, tool envelopes, evidence lookup.
 - `hermes plugins validate`: every check green, including `capability probe`
@@ -165,7 +167,7 @@ openready_plugin/
   evidence.py            read-only approval lookup
   tools.py               tool schemas and handlers
   hook.py                the publish guard
-tests/                   162 tests, no network, no real CLI required
+tests/                   169 tests, no network, no real CLI required
 docs/RESEARCH.md         why each decision was made, with source handles
 ```
 

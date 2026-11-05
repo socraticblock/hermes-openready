@@ -375,6 +375,32 @@ def _body_private(tokens: list[str]) -> bool:
     return "visibility=private" in body or "private=true" in body
 
 
+_VISIBILITY_LITERALS = {"public", "private", "internal"}
+_PRIVATE_LITERALS = {"true", "false"}
+
+
+def _api_visibility_unprovable(tokens: list[str]) -> bool:
+    """A visibility/private field whose value the guard cannot evaluate.
+
+    `gh api -f visibility=$(echo public)` is a public flip. The literal check
+    above cannot see it, and silence would let the flip run. The same rule as
+    the `--visibility` path applies: a value that is not a literal the guard can
+    read is treated as public, because the guard cannot prove what it becomes.
+    """
+    for field in _api_fields(tokens):
+        name, _, value = field.partition("=")
+        key = name.strip().lower()
+        if key not in {"visibility", "private"}:
+            continue
+        literal = value.strip().strip("'\"")
+        if key == "visibility" and literal in _VISIBILITY_LITERALS:
+            continue
+        if key == "private" and literal in _PRIVATE_LITERALS:
+            continue
+        return True
+    return False
+
+
 def _effective_method(tokens: list[str], *, body_flags: bool) -> str:
     """The method the client will actually use.
 
@@ -436,7 +462,7 @@ def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | No
     is_update_path = "/repos/" in path or path.startswith("repos/")
     if not is_update_path:
         return None
-    if _body_public(rest):
+    if _body_public(rest) or _api_visibility_unprovable(rest):
         return Intent(API_VISIBILITY, _repo_target(path), command)
     if opaque:
         # An opaque body could carry `visibility: public`; the guard cannot read
