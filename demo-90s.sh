@@ -23,6 +23,13 @@ sleep 1.5
 say "Five tools prepare and verify a candidate. One hook refuses to let it go public."
 say "The plugin has no push, no visibility change, no upload — by construction."
 
+printf '\n\033[1;36m◆ It is a Hermes plugin, not a script\033[0m\n'; sleep 1.2
+if command -v hermes >/dev/null 2>&1; then
+  hermes plugins validate "$HERE" 2>&1 | grep -E "security scan|Validation passed" | sed 's/^/  /'
+else
+  say "  hermes is not on PATH here; run \`hermes plugins validate\` in a Hermes install."
+fi
+
 step "1. An agent tries to publish a private repository"
 say '$ gh repo edit socraticblock/example --visibility public'
 "$PYTHON" - "$WORK" <<'PY'
