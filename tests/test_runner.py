@@ -14,6 +14,14 @@ def test_missing_binary_is_reported():
     assert "not found" in result.detail
 
 
+def test_a_missing_working_directory_is_not_blamed_on_the_binary():
+    result = run([sys.executable, "-c", "print(1)"], timeout=5, cwd="/nonexistent/workdir")
+    assert result.missing is True
+    assert result.returncode == 64
+    assert "directory does not exist" in result.detail
+    assert "not found" not in result.detail
+
+
 def test_timeout_is_reported_and_bounded():
     result = run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3)
     assert result.timed_out is True
