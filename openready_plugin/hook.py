@@ -51,12 +51,10 @@ def pre_tool_call(**kwargs):
 
     try:
         conf = settings.load()
-        if not conf.guard_enabled:
-            return None
         repo = _repo_path(args)
         destination = intent.destination() or conf.destination
         found = evidence.lookup(repo, destination, conf)
-        directive = publish.decide(intent, guard_enabled=True, evidence=found)
+        directive = publish.decide(intent, evidence=found)
         result = directive.as_hook_result()
         if result and conf.problems:
             result["message"] += "\nGuard configuration problems: " + "; ".join(conf.problems)

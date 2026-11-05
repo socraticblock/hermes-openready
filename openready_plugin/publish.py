@@ -23,6 +23,11 @@ from dataclasses import dataclass
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 PUBLIC = "public"
 
+#: Shell nesting budget. Deep nesting is refused rather than followed forever.
+_MAX_SHELL_DEPTH = 12
+#: A wrapper chain longer than this is not a command an agent types by accident.
+_MAX_WRAPPERS = 64
+
 VISIBILITY = "visibility"
 CREATE_PUBLIC = "create_public"
 API_VISIBILITY = "api_visibility"
@@ -191,11 +196,27 @@ def _api_fields(tokens: list[str]) -> list[str]:
 def _data_payload(tokens: list[str]) -> str:
     chunks: list[str] = []
     for index, token in enumerate(tokens):
-        if token in {"-d", "--data", "--data-raw", "--data-binary", "--json"} and index + 1 < len(tokens):
+        if token in {"-d", "--data", "--data-raw", "--data-binary", "--json",
+                     "--data-urlencode"} and index + 1 < len(tokens):
             chunks.append(tokens[index + 1])
-        elif token.startswith(("--data=", "--data-raw=", "--data-binary=", "--json=")):
+        elif token.startswith(("--data=", "--data-raw=", "--data-binary=", "--json=",
+                               "--data-urlencode=")):
             chunks.append(token.split("=", 1)[1])
     return " ".join(chunks)
+
+
+def _opaque_body(tokens: list[str]) -> bool:
+    """True when the request body lives in a file the guard cannot read."""
+    for index, token in enumerate(tokens):
+        if token in {"-d", "--data", "--data-raw", "--data-binary", "--json",
+                     "--data-urlencode"} and index + 1 < len(tokens):
+            if tokens[index + 1].startswith("@"):
+                return True
+        elif token.startswith(("--data=", "--data-raw=", "--data-binary=", "--json=",
+                               "--data-urlencode=")):
+            if token.split("=", 1)[1].startswith("@"):
+                return True
+    return False
 
 
 #: Wrappers that run another command, and how their own arguments are shaped.
@@ -319,6 +340,13 @@ def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | No
     if not args or args[0] != "api":
         return None
 
+    if len(args) > 1 and args[1] == "graphql":
+        # `gh api graphql -f query='mutation { updateRepository(… visibility: PUBLIC) }'`
+        query = " ".join(_api_fields(args[2:])).lower()
+        if "visibility" in query and PUBLIC in query:
+            return Intent(API_VISIBILITY, "", command)
+        return None
+
     rest = args[1:]
     method = (_flag_value(rest, "--method", "-X") or "GET").upper()
     path = next(
@@ -345,8 +373,30 @@ def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | No
 
 
 def _classify_tokens(tokens: list[str], command: str, depth: int = 0) -> Intent | None:
-    if not tokens or depth > 4:
+    if not tokens:
         return None
+    if depth > _MAX_SHELL_DEPTH:
+        # A shell nested this deep is not honest work. Fail closed when the text
+        # still names a public flip; otherwise pass rather than block blindly.
+        return Intent(VISIBILITY, "", command) if "public" in command.lower() else None
+
+    # Wrappers are stripped iteratively: `sudo sudo sudo gh …` is one gh command,
+    # and spending the nesting budget on it would itself be a bypass.
+    for _ in range(_MAX_WRAPPERS):
+        tokens = _strip_assignments(tokens)
+        if not tokens:
+            return None
+        head = _basename(tokens[0])
+        if head not in _WRAPPERS:
+            break
+        rest = _strip_wrapper(head, tokens)
+        if rest is None:
+            return Intent(VISIBILITY, "", command) if _UNPARSEABLE.search(command) else None
+        if not rest:
+            return None
+        tokens = rest
+    else:
+        return Intent(VISIBILITY, "", command) if "public" in command.lower() else None
 
     tokens = _strip_assignments(tokens)
     if not tokens:
@@ -360,21 +410,20 @@ def _classify_tokens(tokens: list[str], command: str, depth: int = 0) -> Intent 
             if token.startswith("-") and not token.startswith("--") and "c" in token[1:]:
                 if index + 1 >= len(tokens):
                     return None
-                inner = _split(tokens[index + 1])
-                if inner is None:
-                    return (
-                        Intent(VISIBILITY, "", command)
-                        if _UNPARSEABLE.search(tokens[index + 1])
-                        else None
-                    )
-                return _classify_tokens(inner, command, depth + 1)
+                inner_text = tokens[index + 1]
+                # The inner string is a command line of its own: it can hold a
+                # list (`true; gh …`), so it is segmented before tokenising.
+                for inner_segment in segments(inner_text):
+                    inner = _split(inner_segment)
+                    if inner is None:
+                        if _UNPARSEABLE.search(inner_segment):
+                            return Intent(VISIBILITY, "", command)
+                        continue
+                    intent = _classify_tokens(inner, command, depth + 1)
+                    if intent is not None:
+                        return intent
+                return None
         return None
-
-    if head in _WRAPPERS:
-        rest = _strip_wrapper(head, tokens)
-        if rest is None:
-            return Intent(VISIBILITY, "", command) if _UNPARSEABLE.search(command) else None
-        return _classify_tokens(rest, command, depth + 1) if rest else None
 
     if head == "curl":
         return _classify_curl(tokens[1:], command)
@@ -394,8 +443,13 @@ def _classify_curl(args: list[str], command: str) -> Intent | None:
     if method not in {"PATCH", "POST"}:
         return None
     payload = _data_payload(args).lower()
-    if "visibility" not in payload or PUBLIC not in payload:
+    opaque = _opaque_body(args)
+    mentions_public = "visibility" in payload and PUBLIC in payload
+    if not mentions_public and not opaque:
         return None
+    if any("/graphql" in token for token in args):
+        # A GraphQL mutation can flip visibility without naming /repos.
+        return Intent(API_VISIBILITY, "", command) if mentions_public else None
     if method == "POST":
         # `POST /user/repos` or `POST /orgs/<org>/repos` creates a public repo.
         if any(_URL_REPO_CREATE.search(token) for token in args):
@@ -424,19 +478,18 @@ def classify(command: str) -> Intent | None:
     return None
 
 
-def decide(intent: Intent | None, *, guard_enabled: bool, evidence) -> Directive:
+def decide(intent: Intent | None, *, evidence) -> Directive:
     """The whole decision table.
 
     ``evidence`` is any object with ``status`` (``approved`` / ``missing`` /
     ``error``), ``detail`` and ``digest`` attributes.
+
+    There is deliberately no off-switch: a guard that a config flag can turn into
+    a pass-through is a publish path, and this plugin's claim is that it has none.
+    To stop guarding, disable the plugin.
     """
     if intent is None:
         return Directive(None)
-    if not guard_enabled:
-        return Directive(
-            None,
-            message="hermes-openready guard is disabled in this profile (guard_enabled: false)",
-        )
 
     destination = intent.destination() or getattr(evidence, "destination", "") or "the target repository"
 

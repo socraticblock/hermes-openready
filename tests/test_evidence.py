@@ -17,7 +17,7 @@ CHECK_OK = json.dumps(
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(guard_enabled=True, destination="", candidate_dir=".openready-candidate",
+    base = dict(destination="", candidate_dir=".openready-candidate",
                 licence="MIT", openready_bin="openready", openready_python="python3",
                 timeout_seconds=120, approval_timeout_seconds=20)
     base.update(overrides)
@@ -63,6 +63,23 @@ def test_exit_zero_is_approval_with_verified_digest(repo, monkeypatch):
     found = evidence.lookup(repo, "https://github.com/a/b", _settings())
     assert found.status == evidence.APPROVED
     assert found.digest == DIGEST
+
+
+def test_exit_code_false_is_not_success(repo, monkeypatch):
+    """JSON `false` must not pass the `== 0` test (Python: False == 0)."""
+    payload = json.dumps({"command": "check", "exit_code": False, "approval_file": "x"})
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=payload))
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.status == evidence.ERROR
+
+
+def test_malformed_digest_is_not_approval(repo, monkeypatch):
+    payload = json.dumps({"command": "check", "exit_code": 0, "approval_file": "x"})
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=payload))
+    monkeypatch.setattr(evidence, "_recorded_digest", lambda _c: "sha256:nothex")
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.status == evidence.ERROR
+    assert "sha256" in found.detail
 
 
 def test_exit_zero_without_check_json_is_an_error(repo, monkeypatch):

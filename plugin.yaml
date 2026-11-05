@@ -46,7 +46,3 @@ config_schema:
     type: str
     required: false
     description: "Override the destination URL recorded in an approval; by default it is derived from the command target or the repository's origin remote."
-  guard_enabled:
-    type: bool
-    required: false
-    description: "Set false to disable the pre_tool_call publish guard for this profile (default: true)."

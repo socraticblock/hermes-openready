@@ -29,7 +29,6 @@ DEFAULTS: dict[str, Any] = {
     "candidate_dir": ".openready-candidate",
     "licence": "MIT",
     "destination": "",
-    "guard_enabled": True,
 }
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -45,7 +44,6 @@ class Settings:
     candidate_dir: str = DEFAULTS["candidate_dir"]
     licence: str = DEFAULTS["licence"]
     destination: str = DEFAULTS["destination"]
-    guard_enabled: bool = DEFAULTS["guard_enabled"]
     problems: tuple[str, ...] = field(default_factory=tuple)
 
     def candidate_path(self, repo: Path) -> Path:

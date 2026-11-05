@@ -20,7 +20,6 @@ def test_defaults_are_problem_free():
     conf = settings.load()
     assert conf.problems == ()
     assert conf.destination == ""
-    assert conf.guard_enabled is True
 
 
 def test_env_overrides_config(monkeypatch):
@@ -40,10 +39,9 @@ def test_malformed_values_are_reported_not_coerced(monkeypatch):
     monkeypatch.setenv("HERMES_OPENREADY_LICENCE", "   ")
     conf = settings.load()
     assert conf.timeout_seconds == settings.DEFAULTS["timeout_seconds"]
-    assert conf.guard_enabled is settings.DEFAULTS["guard_enabled"]
     assert conf.licence == settings.DEFAULTS["licence"]
     joined = " ".join(conf.problems)
-    assert "timeout_seconds" in joined and "guard_enabled" in joined and "licence" in joined
+    assert "timeout_seconds" in joined and "licence" in joined
 
 
 def test_non_positive_timeout_is_reported(monkeypatch):
@@ -54,10 +52,10 @@ def test_non_positive_timeout_is_reported(monkeypatch):
 
 
 def test_boolean_forms(monkeypatch):
+    """Booleans are parsed strictly; an unparseable value is reported, not coerced."""
     monkeypatch.setenv("HERMES_OPENREADY_GUARD_ENABLED", "off")
-    assert settings.load().guard_enabled is False
-    monkeypatch.setenv("HERMES_OPENREADY_GUARD_ENABLED", "YES")
-    assert settings.load().guard_enabled is True
+    # guard_enabled no longer exists; unknown keys are ignored rather than invented.
+    assert not hasattr(settings.load(), "guard_enabled")
 
 
 def test_candidate_path_resolution(tmp_path):

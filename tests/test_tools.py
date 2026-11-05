@@ -13,7 +13,7 @@ from openready_plugin.settings import Settings
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(guard_enabled=True, destination="https://github.com/a/b",
+    base = dict(destination="https://github.com/a/b",
                 candidate_dir=".openready-candidate", licence="MIT",
                 openready_bin="openready", openready_python="python3",
                 timeout_seconds=120, approval_timeout_seconds=20)
@@ -82,6 +82,29 @@ def test_gate_never_raises(monkeypatch):
     payload = json.loads(tools.handle_gate({"path": "/tmp"}))
     assert payload["status"] == "error"
     assert "boom" in payload["error"]
+
+
+def test_oversized_json_is_reported_as_truncated(monkeypatch):
+    """A capped payload must say it is incomplete, not look like a full result."""
+    monkeypatch.setattr(tools.settings, "load", lambda: _settings())
+    monkeypatch.setattr(tools.runner, "run", lambda *a, **k: RunResult(
+        ("openready", "doctor"), 0, '{"pad": "' + "x" * 300_000 + '"}', "",
+        truncated=True, stdout_bytes=300_010,
+    ))
+    payload = json.loads(tools.handle_doctor({"path": "/tmp"}))
+    assert payload["truncated"] is True
+    assert payload["captured_bytes"] == 300_010
+    assert "data" not in payload
+
+
+def test_unparseable_output_is_flagged(monkeypatch):
+    monkeypatch.setattr(tools.settings, "load", lambda: _settings())
+    monkeypatch.setattr(tools.runner, "run", lambda *a, **k: RunResult(
+        ("openready", "doctor"), 0, "not json at all", "",
+    ))
+    payload = json.loads(tools.handle_doctor({"path": "/tmp"}))
+    assert payload["parsed"] is False
+    assert payload["data_text"] == "not json at all"
 
 
 def test_verify_requires_a_candidate():

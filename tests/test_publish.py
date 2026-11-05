@@ -70,6 +70,17 @@ BLOCK_SHAPES = [
     ),
     ("gh api -X PATCH /repos/socraticblock/example --input payload.json", API_VISIBILITY),
     ("gh api -X PATCH /repos/socraticblock/example -fvisibility=public", API_VISIBILITY),
+    # wrapper chains and compound commands inside a shell
+    ("sudo sudo sudo sudo sudo gh repo edit a/b --visibility public", VISIBILITY),
+    ('bash -lc "true; gh repo edit a/b --visibility public"', VISIBILITY),
+    ('sh -c "git status; gh repo create x --public"', CREATE_PUBLIC),
+    # curl bodies: opaque file, urlencoded field, GraphQL mutation
+    ("curl -X PATCH https://api.github.com/repos/a/b --data @payload.json", API_VISIBILITY),
+    ("curl -X PATCH https://api.github.com/repos/a/b --data-urlencode visibility=public", API_VISIBILITY),
+    (
+        "gh api graphql -f query='mutation { updateRepository(input: {visibility: PUBLIC}) }'",
+        API_VISIBILITY,
+    ),
 ]
 
 
@@ -159,24 +170,21 @@ class _Evidence:
 
 
 def test_pass_when_not_a_publish_command():
-    directive = decide(None, guard_enabled=True, evidence=_Evidence("missing"))
+    directive = decide(None, evidence=_Evidence("missing"))
     assert directive.action is None
     assert directive.as_hook_result() is None
 
 
-def test_disabled_guard_passes():
-    directive = decide(
-        Intent(VISIBILITY, "a/b", "gh repo edit a/b --visibility public"),
-        guard_enabled=False,
-        evidence=_Evidence("missing"),
-    )
-    assert directive.action is None
+def test_disabled_guard_does_not_exist():
+    """There is no config flag that turns the guard into a pass-through."""
+    from openready_plugin import settings
+
+    assert "guard_enabled" not in settings.DEFAULTS
 
 
 def test_approved_escalates_never_auto_allows():
     directive = decide(
         Intent(VISIBILITY, "a/b", "gh repo edit a/b --visibility public"),
-        guard_enabled=True,
         evidence=_Evidence("approved", digest="sha256:" + "a" * 64),
     )
     assert directive.action == "approve"
@@ -189,7 +197,6 @@ def test_approved_escalates_never_auto_allows():
 def test_missing_evidence_blocks_with_instructions():
     directive = decide(
         Intent(VISIBILITY, "a/b", "gh repo edit a/b --visibility public"),
-        guard_enabled=True,
         evidence=_Evidence("missing", detail="publisher check exit 1: no approval"),
     )
     assert directive.action == "block"
@@ -200,7 +207,6 @@ def test_missing_evidence_blocks_with_instructions():
 def test_error_blocks_and_says_fail_closed():
     directive = decide(
         Intent(VISIBILITY, "a/b", "gh repo edit a/b --visibility public"),
-        guard_enabled=True,
         evidence=_Evidence("error", detail="timed out after 20s"),
     )
     assert directive.action == "block"
@@ -212,7 +218,6 @@ def test_block_results_carry_no_rule_key():
     for status in ("missing", "error"):
         directive = decide(
             Intent(VISIBILITY, "a/b", "gh repo edit a/b --visibility public"),
-            guard_enabled=True,
-            evidence=_Evidence(status, detail="x"),
+                evidence=_Evidence(status, detail="x"),
         )
         assert set(directive.as_hook_result()) == {"action", "message"}

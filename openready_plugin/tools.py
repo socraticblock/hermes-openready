@@ -72,7 +72,13 @@ def openready_available() -> bool:
         binary = settings.load().openready_bin
     except Exception:
         return False
-    return bool(shutil.which(binary) or Path(binary).expanduser().is_file())
+    if shutil.which(binary):
+        return True
+    try:
+        return Path(binary).expanduser().is_file()
+    except (RuntimeError, OSError, ValueError):
+        # `~no-such-user/openready` makes expanduser raise; that is "not installed".
+        return False
 
 
 def _resolve(path_value: str | None) -> Path:
@@ -126,6 +132,16 @@ def _envelope(
         "note": _PUBLICATION_NOTE,
     }
     payload.update(_bounded(data))
+    if result.truncated:
+        # The child wrote more than the capture cap; the caller must know the
+        # payload is incomplete rather than assume an empty result.
+        payload["truncated"] = True
+        payload["captured_bytes"] = result.stdout_bytes
+    if data is None and result.stdout.strip():
+        # Exit 0 with output the caller cannot parse is not a usable result:
+        # say so, and hand over a bounded excerpt instead of silence.
+        payload["parsed"] = False
+        payload["data_text"] = result.stdout[:4000]
     if problems:
         payload["settings_problems"] = list(problems)
     if not result.ok:
@@ -231,7 +247,6 @@ def handle_gate(args: dict, **_kw) -> str:
         found = evidence.lookup(repo, destination, conf)
         directive = publish.decide(
             publish.Intent("visibility", "", "openready_gate"),
-            guard_enabled=conf.guard_enabled,
             evidence=found,
         )
         return json.dumps(
@@ -243,7 +258,6 @@ def handle_gate(args: dict, **_kw) -> str:
                 "candidate": found.candidate,
                 "digest": found.digest,
                 "detail": found.detail,
-                "guard_enabled": conf.guard_enabled,
                 "would": directive.action or "pass",
                 "settings_problems": list(conf.problems),
                 "note": _PUBLICATION_NOTE,

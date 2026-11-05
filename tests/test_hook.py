@@ -10,7 +10,7 @@ from openready_plugin.settings import Settings
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(guard_enabled=True, destination="", candidate_dir=".openready-candidate",
+    base = dict(destination="", candidate_dir=".openready-candidate",
                 licence="MIT", openready_bin="openready", openready_python="python3",
                 timeout_seconds=120, approval_timeout_seconds=20)
     base.update(overrides)
@@ -53,12 +53,6 @@ def test_escalates_with_approval(monkeypatch):
     assert result["action"] == "approve"
     assert result["rule_key"].startswith("hermes-openready:publish:a/b:")
     assert set(result) == {"action", "message", "rule_key"}
-
-
-def test_guard_disabled_passes(monkeypatch):
-    monkeypatch.setattr(hook.settings, "load", lambda: _settings(guard_enabled=False))
-    monkeypatch.setattr(hook.evidence, "lookup", lambda *a, **k: pytest.fail("must not run"))
-    assert _call("gh repo edit a/b --visibility public") is None
 
 
 def test_lookup_failure_blocks_publish_command(monkeypatch):

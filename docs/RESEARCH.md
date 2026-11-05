@@ -91,8 +91,13 @@ Tools (all read-only or candidate-producing; **none publishes**):
 
 Hook: `pre_tool_call` on `terminal` only.
 
-Config schema: `openready_bin` (str, default `openready`), `timeout_seconds` (int, default 120),
-`guard_enabled` (bool, default true), `approval_home` (str, optional).
+Config schema: `openready_bin` (str, default `openready`), `openready_python` (str, default
+`python3`), `timeout_seconds` (int, default 120), `approval_timeout_seconds` (int, default 20),
+`candidate_dir` (str), `licence` (str, default `MIT`), `destination` (str, optional override).
+
+There is no `guard_enabled` flag. A guard that a config value can turn into a pass-through is
+itself a publish path, and this plugin's claim is that it has none; to stop guarding, disable
+the plugin.
 
 ### The invariant
 
@@ -106,7 +111,6 @@ Config schema: `openready_bin` (str, default `openready`), `timeout_seconds` (in
 | condition | action |
 | --- | --- |
 | command does not match publish grammar | pass through (`None`) |
-| matches, `guard_enabled: false` | pass through (documented off-switch, owner config) |
 | matches, no packet / unreadable / digest mismatch | `block` with the reason and the next command to run |
 | matches, verified packet + approval record for digest+destination | `approve` (human gate, message carries digest + packet path) |
 | `openready` missing, times out, or returns unusable JSON | `block` (fail closed), message names the fault |
@@ -181,10 +185,10 @@ Host: WSL2, Open-Ready `0.1.0-p0`, Python 3.14.9, pytest 9.2.0.
 **Unit suite** — `python -m pytest -q` in `~/projects/hermes-openready`:
 
 ```
-120 passed in 0.93s
+129 passed in 1.04s
 ```
 
-Covers: 33 publish shapes classified, 31 non-publish shapes passed (including
+Covers: 39 publish shapes classified, 31 non-publish shapes passed (including
 `echo "gh repo edit --visibility public"`, `git push origin main`, `gh api` GET,
 `-f visibility=private`, `GH_TOKEN=x gh repo view`, `env -u FOO git status`), decision
 table (approved → `approve`, missing → `block`, error → `block`), runner (missing binary,
@@ -273,6 +277,38 @@ hit the same shell-prefix hole:
 Declined: writing a general shell parser (a grammar that guesses produces false blocks),
 and treating every `gh api` write as a publish (false positives on ordinary metadata edits).
 Both are recorded as limits in the README rather than hidden.
+
+**Round 3** — `gpt-reserve` through the Codex CLI with a read-only sandbox, so unlike the
+chat-only reviewers it *ran* the classifier against its own test strings and pasted the
+output. Ten findings, all acted on:
+
+13. `sudo sudo sudo sudo sudo gh repo edit … --visibility public` passed: each wrapper consumed
+    the nesting budget, so the fifth one fell through. Wrappers are now stripped in a loop
+    (budget 64) that does not touch the shell-nesting budget, and hitting either limit fails
+    closed when the text still names a public flip.
+14. `bash -lc "true; gh repo edit … --visibility public"` passed: the inner string was
+    `shlex`-split once and only its first token examined, so `true;` hid the rest. Inner shell
+    strings are now re-segmented as command lists.
+15. `curl -X PATCH … --data @payload.json` passed: a body file is opaque to the guard. It is
+    now escalated, like `gh api --input`.
+16. `curl … --data-urlencode visibility=public` passed: the flag was not in the payload
+    reader. Added, with `--data-binary`/`--json`.
+17. `gh api graphql -f query='mutation { updateRepository(… visibility: PUBLIC) }'` passed:
+    GraphQL names no `/repos` path. A GraphQL query that mentions visibility and PUBLIC is
+    now a publish intent.
+18. `guard_enabled: false` was a documented off-switch that turned the guard into a
+    pass-through. Removed: a flag that disables the guard *is* a publish path. To stop
+    guarding, disable the plugin.
+19. `evidence.py` accepted `{"exit_code": false}` as success, because Python's `False == 0`.
+    The value is now checked as a strict `int` and `bool` is rejected.
+20. A digest that was not `sha256:<64 hex>` was passed through into the approval message.
+    It is now an error.
+21. `runner` buffered the child's entire output before applying the 200 kB cap, so a noisy
+    process could exhaust memory first. Output is now read in 64 kB chunks and only the cap
+    is kept; `truncated`/`captured_bytes` are reported.
+22. `openready_available()` raised on `~no-such-user/openready` (expanduser raises
+    `RuntimeError`); it now returns `False`, and every handler is wrapped so no path can
+    raise into dispatch.
 
 **Bugs the evidence caught during the build** (all fixed, each now pinned by a test):
 

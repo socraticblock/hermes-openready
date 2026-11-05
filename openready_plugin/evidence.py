@@ -14,6 +14,7 @@ Exit codes are Open-Ready's closed vocabulary (``status.py``): 0 ok, 1 fail,
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,8 +141,17 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
         # Exit 0 alone is not an approval: a misconfigured interpreter (or any
         # executable that succeeds) would otherwise read as "owner approved".
         # The publisher's own JSON must say it ran `check` and name the store.
+        # `exit_code` is checked as a strict int: Python's `False == 0`, so a
+        # JSON `false` must not be read as success.
         data = result.json()
-        if not isinstance(data, dict) or data.get("command") != "check" or data.get("exit_code") != 0:
+        code = data.get("exit_code") if isinstance(data, dict) else None
+        if (
+            not isinstance(data, dict)
+            or data.get("command") != "check"
+            or not isinstance(code, int)
+            or isinstance(code, bool)
+            or code != 0
+        ):
             return Evidence(
                 ERROR,
                 detail=(
@@ -159,12 +169,20 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
                 destination=destination,
                 candidate=str(candidate),
             )
+        verified_digest = digest or _recorded_digest(candidate)
+        if verified_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", verified_digest):
+            return Evidence(
+                ERROR,
+                detail=f"publisher check reported a digest that is not sha256:<64 hex>: {verified_digest[:40]!r}",
+                destination=destination,
+                candidate=str(candidate),
+            )
         return Evidence(
             APPROVED,
             detail="owner approval found",
             destination=destination,
             candidate=str(candidate),
-            digest=digest or _recorded_digest(candidate),
+            digest=verified_digest,
         )
     if result.returncode in (1, 2, 3):
         return Evidence(

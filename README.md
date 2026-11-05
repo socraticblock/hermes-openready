@@ -123,7 +123,7 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **120 passed** — grammar table (33 publish shapes, 31 non-publish shapes),
+- `pytest`: **129 passed** — grammar table (39 publish shapes, 31 non-publish shapes),
   decision table, runner failure modes (including a grandchild holding the pipe open),
   settings precedence, tool envelopes, evidence lookup.
 - `hermes plugins validate`: every check green, including `capability probe`
