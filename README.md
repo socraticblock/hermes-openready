@@ -77,10 +77,14 @@ repository's public surface:
 | visibility change | `gh repo edit owner/repo --visibility public` |
 | public creation | `gh repo create name --public` |
 | API equivalent | `gh api -X PATCH /repos/owner/repo -f visibility=public` |
+| direct REST | `curl -X PATCH https://api.github.com/repos/owner/repo -d '{"visibility":"public"}'` |
+| behind a wrapper | `sudo …`, `timeout 30 …`, `env -S "…"`, `bash -lc "…"` |
+| in a command list | `git status; gh repo edit owner/repo --visibility public` |
 
-It sees through `/usr/bin/gh`, `--repo/-R`, `--flag=value`, and `bash -c "…"`. It does not
-try to recognise every possible way to publish: a grammar that guesses produces false
-blocks, and a guard that blocks honest work gets switched off.
+It sees through absolute paths, `--repo/-R`, `--flag=value`, attached short flags
+(`-XPOST`), stacked shell flags (`bash -lc`), and the wrappers above. It does not try to
+recognise every possible way to publish: a grammar that guesses produces false blocks, and a
+guard that blocks honest work gets switched off.
 
 Decision table:
 
@@ -101,8 +105,15 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 - **Other tools.** Only `terminal` is inspected. An MCP server, a plugin tool, or a browser
   action that changes visibility is out of scope.
-- **Obfuscation.** `$(echo gh) repo edit …`, aliases, a script the agent writes and then
-  runs. The grammar catches the shapes in the table, not every shell construction.
+- **Obfuscation.** `$(echo gh) repo edit …`, a base64 payload, or a script the agent writes
+  and then runs. The grammar catches the shapes in the table, not every shell construction.
+- **A fake approval.** The guard trusts the publisher's own JSON: if `openready_python` is
+  pointed at something that prints a plausible `check` result, the guard will believe it.
+  It refuses silent success (exit 0 with no check JSON is an error), but it cannot
+  authenticate the interpreter — that is a configuration responsibility.
+- **Opaque API bodies.** `gh api … --input body.json` against a repo endpoint is escalated,
+  because the guard cannot read the body. A PATCH that only changes a description will
+  still ask for confirmation; that is the deliberate cost of not guessing.
 - **A writable approval store.** An approval record is a file. Anyone who can write it can
   rewrite the record and its digest together. Keep it where only the owner writes.
 - **Anything after the fact.** The guard refuses a command; it does not audit what happened
@@ -112,9 +123,9 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **74 passed** — grammar table (12 publish shapes, 15 non-publish shapes),
-  decision table, runner failure modes, settings precedence, tool envelopes, evidence
-  lookup.
+- `pytest`: **120 passed** — grammar table (33 publish shapes, 31 non-publish shapes),
+  decision table, runner failure modes (including a grandchild holding the pipe open),
+  settings precedence, tool envelopes, evidence lookup.
 - `hermes plugins validate`: every check green, including `capability probe`
   (`register() ran in isolation`), `declared tools`, `declared hooks`, `security scan`,
   and `no core override`.
@@ -139,7 +150,7 @@ openready_plugin/
   evidence.py            read-only approval lookup
   tools.py               tool schemas and handlers
   hook.py                the publish guard
-tests/                   74 tests, no network, no real CLI required
+tests/                   120 tests, no network, no real CLI required
 docs/RESEARCH.md         why each decision was made, with source handles
 ```
 

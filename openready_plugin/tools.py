@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
@@ -132,6 +133,40 @@ def _envelope(
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _error_envelope(tool: str, detail: str) -> str:
+    return json.dumps(
+        {
+            "tool": tool,
+            "ok": False,
+            "status": "error",
+            "publication": "NOT_APPROVED",
+            "error": detail,
+            "note": _PUBLICATION_NOTE,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _guard(tool: str) -> Callable:
+    """Make a handler's contract true: it returns JSON, it never raises.
+
+    Argument validation upstream is not a guarantee — a direct call, a hook, or a
+    schema change can hand a handler a path that makes ``Path.resolve`` throw.
+    """
+
+    def decorate(fn: Callable[[dict, Any], str]) -> Callable[[dict, Any], str]:
+        @wraps(fn)
+        def wrapper(args: dict | None, **kwargs: Any) -> str:
+            try:
+                return fn(args or {}, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - the contract is "never raise"
+                return _error_envelope(tool, f"{type(exc).__name__}: {exc}")
+
+        return wrapper
+
+    return decorate
+
+
 def _run_tool(
     tool: str,
     argv: list[str],
@@ -143,6 +178,7 @@ def _run_tool(
     return _envelope(tool, result, data=result.json(), problems=conf.problems)
 
 
+@_guard("openready_status")
 def handle_status(args: dict, **_kw) -> str:
     conf = _config()
     repo = _resolve(args.get("path"))
@@ -152,6 +188,7 @@ def handle_status(args: dict, **_kw) -> str:
     return _run_tool("openready_status", argv, cwd=repo, conf=conf)
 
 
+@_guard("openready_doctor")
 def handle_doctor(args: dict, **_kw) -> str:
     conf = _config()
     repo = _resolve(args.get("path"))
@@ -159,6 +196,7 @@ def handle_doctor(args: dict, **_kw) -> str:
     return _run_tool("openready_doctor", argv, cwd=repo, conf=conf)
 
 
+@_guard("openready_candidate")
 def handle_candidate(args: dict, **_kw) -> str:
     conf = _config()
     repo = _resolve(args.get("path"))
@@ -168,9 +206,13 @@ def handle_candidate(args: dict, **_kw) -> str:
     return _run_tool("openready_candidate", argv, cwd=repo, conf=conf)
 
 
+@_guard("openready_verify")
 def handle_verify(args: dict, **_kw) -> str:
     conf = _config()
-    candidate = Path(args["candidate"]).expanduser().resolve()
+    raw = str(args.get("candidate") or "").strip()
+    if not raw:
+        return _error_envelope("openready_verify", "candidate is required (path to a candidate directory)")
+    candidate = Path(raw).expanduser().resolve()
     argv = [_binary(conf), "verify", "--candidate", str(candidate), "--json"]
     if args.get("packet"):
         argv += ["--packet", str(Path(args["packet"]).expanduser().resolve())]
@@ -179,6 +221,7 @@ def handle_verify(args: dict, **_kw) -> str:
     return _run_tool("openready_verify", argv, cwd=candidate.parent, conf=conf)
 
 
+@_guard("openready_gate")
 def handle_gate(args: dict, **_kw) -> str:
     """Read-only: what would the guard decide for this destination right now?"""
     try:
@@ -208,11 +251,7 @@ def handle_gate(args: dict, **_kw) -> str:
             ensure_ascii=False,
         )
     except Exception as exc:  # a read-only tool still must not raise
-        return json.dumps(
-            {"tool": "openready_gate", "ok": False, "status": "error",
-             "error": f"{type(exc).__name__}: {exc}"},
-            ensure_ascii=False,
-        )
+        return _error_envelope("openready_gate", f"{type(exc).__name__}: {exc}")
 
 
 TOOLS = (

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openready_plugin import tools
 from openready_plugin.evidence import Evidence
 from openready_plugin.runner import RunResult
@@ -80,6 +82,20 @@ def test_gate_never_raises(monkeypatch):
     payload = json.loads(tools.handle_gate({"path": "/tmp"}))
     assert payload["status"] == "error"
     assert "boom" in payload["error"]
+
+
+def test_verify_requires_a_candidate():
+    payload = json.loads(tools.handle_verify({}))
+    assert payload["status"] == "error"
+    assert "candidate is required" in payload["error"]
+
+
+def test_handlers_survive_an_unresolvable_path(monkeypatch):
+    monkeypatch.setattr(tools.settings, "load", lambda: _settings())
+    monkeypatch.setattr(tools.runner, "run", lambda *a, **k: pytest.fail("must not run"))
+    payload = json.loads(tools.handle_status({"path": "\x00"}))
+    assert payload["status"] == "error"
+    assert "ValueError" in payload["error"]
 
 
 def test_availability_check(monkeypatch):

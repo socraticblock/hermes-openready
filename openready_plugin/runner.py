@@ -2,19 +2,26 @@
 
 One rule governs this module: **a call never raises and never hangs**. Every
 failure mode a host can produce — binary absent, permission denied, timeout,
-non-UTF-8 output, absurd output size — is returned as data, because the caller is
-a guard that must fail closed rather than propagate an exception into the agent
-loop.
+non-UTF-8 output, absurd output size, a grandchild holding the pipe open — is
+returned as data, because the caller is a guard that must fail closed rather than
+propagate an exception into the agent loop.
+
+Timeouts kill the whole process group, not just the direct child: a child that
+spawns a descendant inheriting stdout would otherwise keep the pipe open and
+``communicate()`` would wait past the deadline.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 MAX_CAPTURE_CHARS = 200_000
+_KILL_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,20 @@ class RunResult:
         return text
 
 
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the child and anything it started, without raising."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:  # pragma: no cover - non-POSIX
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def run(
     argv: Sequence[str],
     *,
@@ -60,13 +81,13 @@ def run(
     if not args:
         return RunResult(args, 127, "", "", missing=True, detail="empty argv")
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             list(args),
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=cwd,
             env=dict(env) if env is not None else None,
-            check=False,
+            start_new_session=True,
         )
     except FileNotFoundError:
         return RunResult(args, 127, "", "", missing=True,
@@ -74,13 +95,21 @@ def run(
     except PermissionError:
         return RunResult(args, 126, "", "", missing=True,
                          detail=f"not executable: {args[0]}")
-    except subprocess.TimeoutExpired:
-        return RunResult(args, 124, "", "", timed_out=True,
-                         detail=f"timed out after {timeout:g}s")
     except OSError as exc:
         return RunResult(args, 126, "", "", missing=True,
                          detail=f"{type(exc).__name__}: {exc}")
 
-    stdout = proc.stdout.decode("utf-8", "replace")[:MAX_CAPTURE_CHARS]
-    stderr = proc.stderr.decode("utf-8", "replace")[:MAX_CAPTURE_CHARS]
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout_bytes, stderr_bytes = b"", b""
+        return RunResult(args, 124, "", "", timed_out=True,
+                         detail=f"timed out after {timeout:g}s")
+
+    stdout = stdout_bytes.decode("utf-8", "replace")[:MAX_CAPTURE_CHARS]
+    stderr = stderr_bytes.decode("utf-8", "replace")[:MAX_CAPTURE_CHARS]
     return RunResult(args, proc.returncode, stdout, stderr)

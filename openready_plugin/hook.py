@@ -18,7 +18,6 @@ from pathlib import Path
 from . import evidence, publish, settings
 
 GUARDED_TOOL = "terminal"
-RULE_KEY = "hermes-openready:publish"
 
 
 def _repo_path(args: dict) -> Path:
@@ -43,11 +42,9 @@ def pre_tool_call(**kwargs):
     try:
         intent = publish.classify(command)
     except Exception:
-        # Classification itself failed: fail closed only if it smells like a publish.
-        intent = None
-        if "gh" in command and "repo" in command and "public" in command:
-            return {"action": "block", "message": _fail_closed(command, "classifier error"),
-                    "rule_key": RULE_KEY}
+        # The classifier is pure and should never raise; if it does, the guard has
+        # no idea what the command is, so every non-empty command fails closed.
+        return {"action": "block", "message": _fail_closed(command, "classifier error")}
 
     if intent is None:
         return None
@@ -65,8 +62,7 @@ def pre_tool_call(**kwargs):
             result["message"] += "\nGuard configuration problems: " + "; ".join(conf.problems)
         return result
     except Exception as exc:
-        return {"action": "block", "message": _fail_closed(command, f"{type(exc).__name__}: {exc}"),
-                "rule_key": RULE_KEY}
+        return {"action": "block", "message": _fail_closed(command, f"{type(exc).__name__}: {exc}")}
 
 
 def _fail_closed(command: str, detail: str) -> str:

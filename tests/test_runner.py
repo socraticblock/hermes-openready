@@ -20,6 +20,22 @@ def test_timeout_is_reported_and_bounded():
     assert result.returncode == 124
 
 
+def test_timeout_kills_descendants_that_hold_the_pipe():
+    """A grandchild inheriting stdout must not extend the deadline."""
+    import time
+
+    script = (
+        "import subprocess, sys, time;"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']);"
+        "time.sleep(30)"
+    )
+    started = time.monotonic()
+    result = run([sys.executable, "-c", script], timeout=0.5)
+    elapsed = time.monotonic() - started
+    assert result.timed_out is True
+    assert elapsed < 10, f"timeout leaked: {elapsed:.1f}s"
+
+
 def test_json_parses_and_non_json_returns_none():
     good = run([sys.executable, "-c", "print('{\"a\": 1}')"], timeout=10)
     assert good.json() == {"a": 1}

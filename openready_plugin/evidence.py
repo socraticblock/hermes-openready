@@ -137,6 +137,28 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
             candidate=str(candidate),
         )
     if result.returncode == 0:
+        # Exit 0 alone is not an approval: a misconfigured interpreter (or any
+        # executable that succeeds) would otherwise read as "owner approved".
+        # The publisher's own JSON must say it ran `check` and name the store.
+        data = result.json()
+        if not isinstance(data, dict) or data.get("command") != "check" or data.get("exit_code") != 0:
+            return Evidence(
+                ERROR,
+                detail=(
+                    "publisher check exited 0 but did not report a check result; "
+                    f"is `{settings.openready_python}` really running openready?"
+                ),
+                destination=destination,
+                candidate=str(candidate),
+            )
+        approval_file = data.get("approval_file")
+        if not isinstance(approval_file, str) or not approval_file.strip():
+            return Evidence(
+                ERROR,
+                detail="publisher check exited 0 without naming an approval store; refusing to read that as an approval",
+                destination=destination,
+                candidate=str(candidate),
+            )
         return Evidence(
             APPROVED,
             detail="owner approval found",

@@ -181,17 +181,20 @@ Host: WSL2, Open-Ready `0.1.0-p0`, Python 3.14.9, pytest 9.2.0.
 **Unit suite** — `python -m pytest -q` in `~/projects/hermes-openready`:
 
 ```
-74 passed in 0.40s
+120 passed in 0.93s
 ```
 
-Covers: 12 publish shapes classified, 15 non-publish shapes passed (including
+Covers: 33 publish shapes classified, 31 non-publish shapes passed (including
 `echo "gh repo edit --visibility public"`, `git push origin main`, `gh api` GET,
-`-f visibility=private`), decision table (approved → `approve`, missing → `block`,
-error → `block`), runner (missing binary, timeout, non-UTF-8-safe decode, 200k capture cap,
-empty argv), settings (env > config > defaults, malformed int/bool/text reported),
-tool envelopes (exit 2 → `NEEDS_HUMAN`, exit 0 still `NOT_APPROVED`), evidence lookup
-(exit 0 → approved + verified digest; 1/2/3 → refusal with no borrowed digest; 124 →
-error; argv is `-m openready.publisher`, never a shell string).
+`-f visibility=private`, `GH_TOKEN=x gh repo view`, `env -u FOO git status`), decision
+table (approved → `approve`, missing → `block`, error → `block`), runner (missing binary,
+timeout, a grandchild holding the pipe open, non-UTF-8-safe decode, 200k capture cap,
+empty argv), settings (env > config > defaults, malformed int/bool/text reported), tool
+envelopes (exit 2 → `NEEDS_HUMAN`, exit 0 still `NOT_APPROVED`, no argument and an
+unresolvable path both return an error envelope instead of raising), evidence lookup
+(exit 0 with a real `check` payload → approved + verified digest; exit 0 without check JSON
+→ error; 1/2/3 → refusal with no borrowed digest; 124 → error; argv is
+`-m openready.publisher`, never a shell string).
 
 **Admission** — `validate_plugin_dir(Path("~/projects/hermes-openready"))` using the
 Hermes venv interpreter:
@@ -226,6 +229,50 @@ store redirected with `OPENREADY_APPROVAL_HOME`):
   digest `sha256:47e5f762b7c7b01c907c9a6383d61f73a7a5954bfe038ec34c0eda9c87c2616f`
   (read from `CANDIDATE.json` only after the publisher check re-derived it); the hook returns
   `approve`, never a silent pass.
+
+**External adversarial review** — two free models on opencode-go (`gpt-6-luna`, effort
+high; `beam-free`, effort high), each given the full source and a brief asking for concrete
+bypasses and contract violations. Two rounds, both read in full.
+
+Round 1 (before the grammar expansion) found:
+
+1. `exit 0` from the configured `openready_python` was treated as approval. A succeeding
+   non-Open-Ready executable would have produced a borrowed digest. Now the stdout must
+   parse as the publisher's own result: `command == "check"`, `exit_code == 0`, and a
+   non-empty `approval_file`; otherwise the lookup returns `error` and the guard blocks.
+2. Block directives carried `rule_key` while approve directives carried a different one.
+   `rule_key` scopes an approval, so blocks no longer carry it.
+3. Grammar gaps: `curl` REST calls, wrapper prefixes (`sudo`, `timeout`, `env -S`,
+   `bash -lc`), command lists (`;`, `&&`), attached short flags (`-XPOST`).
+
+Round 2 (after those fixes) found, and this is the useful part — both models independently
+hit the same shell-prefix hole:
+
+4. `GH_TOKEN=x gh repo edit … --visibility public` passed, because the assignment was read
+   as the command name. Leading `NAME=value` tokens are now stripped before classification.
+5. `gh -R owner/repo repo edit --visibility public` passed: `gh` accepts global flags before
+   the subcommand. Global flags are skipped (and `-R/--repo` still supplies the target).
+6. Repeated `--visibility private --visibility public` used the first value. Any `public`
+   now wins, which is both the conservative and the CLI-compatible reading.
+7. Public creation over REST (`gh api -X POST /user/repos -f visibility=public`,
+   `curl -X POST …/user/repos`) was invisible: the old code only recognised `/repos/owner/name`.
+   Creation endpoints are now a separate case.
+8. `gh api -X PATCH /repos/o/n --input body.json` was passed although the body could set
+   `visibility: public`. It is now escalated; the README states the false-positive cost.
+9. `env -S "…"` whose inner string would not tokenise was treated as empty and passed. It
+   now fails closed when the raw text names `public`.
+10. The hook's classifier-exception path only blocked commands containing `gh`, `repo` and
+    `public`; a `curl` command would have passed. Any non-empty command now blocks when the
+    classifier raises.
+11. `rule_key` was a single constant, so one "always allow" could cover a later, different
+    artifact. It is now `hermes-openready:publish:<target>:<digest-prefix>`.
+12. `runner` used `subprocess.run(timeout=…)`, which kills the direct child only; a
+    grandchild holding stdout could outlive the deadline. It now starts a new session and
+    kills the process group, pinned by a test that spawns a pipe-holding grandchild.
+
+Declined: writing a general shell parser (a grammar that guesses produces false blocks),
+and treating every `gh api` write as a publish (false positives on ordinary metadata edits).
+Both are recorded as limits in the README rather than hidden.
 
 **Bugs the evidence caught during the build** (all fixed, each now pinned by a test):
 

@@ -42,6 +42,7 @@ def test_blocks_without_approval(monkeypatch):
     result = _call("gh repo edit a/b --visibility public")
     assert result["action"] == "block"
     assert "No owner approval" in result["message"]
+    assert set(result) == {"action", "message"}
 
 
 def test_escalates_with_approval(monkeypatch):
@@ -50,7 +51,8 @@ def test_escalates_with_approval(monkeypatch):
                         lambda repo, dest, conf: Evidence("approved", digest="sha256:" + "b" * 64))
     result = _call("gh repo edit a/b --visibility public")
     assert result["action"] == "approve"
-    assert result["rule_key"] == "hermes-openready:publish"
+    assert result["rule_key"].startswith("hermes-openready:publish:a/b:")
+    assert set(result) == {"action", "message", "rule_key"}
 
 
 def test_guard_disabled_passes(monkeypatch):
@@ -83,3 +85,14 @@ def test_settings_failure_blocks_publish_command(monkeypatch):
 def test_missing_command_argument_passes():
     assert hook.pre_tool_call(tool_name="terminal", args={}) is None
     assert hook.pre_tool_call(tool_name="terminal", args={"command": ""}) is None
+
+
+def test_classifier_failure_blocks_even_a_benign_command(monkeypatch):
+    """If classification breaks, the guard has no idea what the command is."""
+    def explode(_command):
+        raise RuntimeError("classifier bug")
+
+    monkeypatch.setattr(hook.publish, "classify", explode)
+    result = _call("git status")
+    assert result["action"] == "block"
+    assert "fails closed" in result["message"]

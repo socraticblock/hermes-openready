@@ -11,6 +11,9 @@ from openready_plugin.runner import RunResult
 from openready_plugin.settings import Settings
 
 DIGEST = "sha256:" + "d" * 64
+CHECK_OK = json.dumps(
+    {"command": "check", "exit_code": 0, "approval_file": "/tmp/approvals.json"}
+)
 
 
 def _settings(**overrides) -> Settings:
@@ -56,10 +59,26 @@ def test_missing_interpreter_is_an_error(repo, monkeypatch):
 
 
 def test_exit_zero_is_approval_with_verified_digest(repo, monkeypatch):
-    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0))
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=CHECK_OK))
     found = evidence.lookup(repo, "https://github.com/a/b", _settings())
     assert found.status == evidence.APPROVED
     assert found.digest == DIGEST
+
+
+def test_exit_zero_without_check_json_is_an_error(repo, monkeypatch):
+    """`openready_python=/bin/true` exits 0 with no output; that is not an approval."""
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0))
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.status == evidence.ERROR
+    assert "did not report a check result" in found.detail
+
+
+def test_exit_zero_without_approval_file_is_an_error(repo, monkeypatch):
+    payload = json.dumps({"command": "check", "exit_code": 0})
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=payload))
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.status == evidence.ERROR
+    assert "without naming an approval store" in found.detail
 
 
 @pytest.mark.parametrize("rc", [1, 2, 3])
