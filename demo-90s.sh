@@ -21,7 +21,8 @@ say()  { printf '%s\n' "$*"; sleep 0.8; }
 printf '\033[1mhermes-openready\033[0m — a release gate that cannot publish\n'
 sleep 1.5
 say "Five tools prepare and verify a candidate. One hook refuses to let it go public."
-say "The plugin has no push, no visibility change, no upload — by construction."
+say "The plugin itself has no push, no visibility change, no upload — by construction."
+say "It sees the terminal tool; the README names the routes it does not cover." 
 
 printf '\n\033[1;36m◆ It is a Hermes plugin, not a script\033[0m\n'; sleep 1.2
 if command -v hermes >/dev/null 2>&1; then
@@ -45,7 +46,8 @@ print("  " + r["message"].splitlines()[1])
 PY
 
 step "2. So the agent prepares a candidate instead"
-say '$ openready candidate --path .'
+say '$ openready new --path ./project'
+say '$ openready candidate --path ./project'
 "$PYTHON" -m openready new --path "$WORK/project" --json >/dev/null
 "$PYTHON" -m openready candidate --path "$WORK/project" --json >/dev/null
 "$PYTHON" - "$WORK/project/.openready-candidate/CANDIDATE.json" <<'PY'
@@ -72,9 +74,9 @@ from openready_plugin import hook
 r = hook.pre_tool_call(tool_name="terminal", args={
     "command": "gh repo edit socraticblock/example --visibility public",
     "workdir": sys.argv[1]})
+import textwrap
 print("\n  hook →", r["action"])
-print("  " + r["message"].split("Publication is")[0].strip())
-print("  Publication is still the owner's decision — confirm to allow this command.")
+print(textwrap.fill(r["message"], 88, initial_indent="  ", subsequent_indent="  "))
 print("  rule_key:", r["rule_key"][:34] + "…")
 PY
 
