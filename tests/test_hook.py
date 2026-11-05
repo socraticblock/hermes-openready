@@ -90,3 +90,24 @@ def test_classifier_failure_blocks_even_a_benign_command(monkeypatch):
     result = _call("git status")
     assert result["action"] == "block"
     assert "fails closed" in result["message"]
+
+
+def test_invalid_configuration_blocks_before_the_approval_lookup(monkeypatch):
+    """A malformed setting changes which approvals apply, so it is not normalised away."""
+    monkeypatch.setattr(hook.settings, "load",
+                        lambda: _settings(problems=("licence: '   ' is empty",)))
+    monkeypatch.setattr(hook.evidence, "lookup",
+                        lambda *a, **k: pytest.fail("must not look up an approval"))
+    result = _call("gh repo edit a/b --visibility public")
+    assert result["action"] == "block"
+    assert "configuration is invalid" in result["message"]
+
+
+def test_an_approval_for_one_repo_never_authorises_creating_another(monkeypatch):
+    """`gh repo create newname` names no owner/repo, so nothing can be bound to it."""
+    monkeypatch.setattr(hook.settings, "load", lambda: _settings())
+    monkeypatch.setattr(hook.evidence, "lookup",
+                        lambda *a, **k: Evidence("approved", digest="sha256:" + "c" * 64))
+    result = _call("gh repo create unrelated-repo --public")
+    assert result["action"] == "block"
+    assert "does not name the repository" in result["message"]

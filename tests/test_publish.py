@@ -81,6 +81,56 @@ BLOCK_SHAPES = [
         "gh api graphql -f query='mutation { updateRepository(input: {visibility: PUBLIC}) }'",
         API_VISIBILITY,
     ),
+    # REST creation defaults to public: silence is a publish
+    ("gh api /user/repos -f name=example", CREATE_PUBLIC),
+    ("gh api -X POST /orgs/acme/repos -f name=example", CREATE_PUBLIC),
+    (
+        'curl -X POST https://api.github.com/user/repos -d \'{"name":"x"}\'',
+        CREATE_PUBLIC,
+    ),
+    (
+        'curl --json \'{"name":"x"}\' https://api.github.com/user/repos',
+        CREATE_PUBLIC,
+    ),
+    # `private: false` is the other spelling of a visibility flip
+    ("gh api -X PATCH /repos/a/b -f private=false", API_VISIBILITY),
+    (
+        'curl -X PATCH https://api.github.com/repos/a/b -d \'{"private":false}\'',
+        API_VISIBILITY,
+    ),
+    # quoting the tokeniser cannot resolve is not evidence of "private"
+    ("gh repo edit a/b --visibility $'public'", VISIBILITY),
+    ("gh repo edit a/b --visibility=pub$'lic'", VISIBILITY),
+    # shell syntax that runs a command without being the command
+    ("time gh repo edit a/b --visibility public", VISIBILITY),
+    ("! gh repo edit a/b --visibility public", VISIBILITY),
+    ("{ gh repo edit a/b --visibility public; }", VISIBILITY),
+    ("(gh repo edit a/b --visibility public)", VISIBILITY),
+    ("setsid gh repo edit a/b --visibility public", VISIBILITY),
+    ("script -qec 'gh repo edit a/b --visibility public' /dev/null", VISIBILITY),
+    ("if true; then gh repo edit a/b --visibility public; fi", VISIBILITY),
+    ("for i in 1; do gh repo create x --public; done", CREATE_PUBLIC),
+    # curl bodies: attached short flags and file-backed field values
+    (
+        "curl -XPATCH https://api.github.com/repos/a/b -d'{\"visibility\":\"public\"}'",
+        API_VISIBILITY,
+    ),
+    (
+        "curl -XPATCH https://api.github.com/repos/a/b --data-urlencode visibility@payload.txt",
+        API_VISIBILITY,
+    ),
+    ("curl -XPATCH https://api.github.com/repos/a/b -d@body.json", API_VISIBILITY),
+    # GraphQL mutations whose body lives in a file
+    ("gh api graphql --input mutation.json", API_VISIBILITY),
+    ("gh api graphql -F query=@mutation.graphql", API_VISIBILITY),
+    (
+        "curl -X POST https://api.github.com/graphql --json @mutation.json",
+        API_VISIBILITY,
+    ),
+    ("gh api -X PATCH /repos/a/b -F visibility=@file", API_VISIBILITY),
+    # a wrapper chain past the budget is unclassifiable, so it is refused
+    ("env " * 65 + "curl -X PATCH https://api.github.com/repos/a/b --data @payload.json",
+     VISIBILITY),
 ]
 
 
@@ -116,9 +166,16 @@ PASS_SHAPES = [
     "GH_TOKEN=x gh repo view a/b",
     "gh -R a/b repo view",
     "env -u FOO git status",
-    "gh api -X POST /user/repos -f name=example",
+    # an explicitly private create is not a publish
+    "gh api -X POST /user/repos -f name=example -f private=true",
+    'curl -X POST https://api.github.com/user/repos -d \'{"name":"x","private":true}\'',
+    "gh repo create example",
+    # REST writes that do not touch visibility
     "gh api -X PATCH /repos/socraticblock/example -f description=x",
-    "curl -X POST https://api.github.com/user/repos -d '{\"name\":\"x\"}'",
+    "curl -XPATCH https://api.github.com/repos/a/b -d'{\"description\":\"x\"}'",
+    # shell syntax in front of a harmless command
+    "time gh repo view a/b",
+    "(gh repo view a/b)",
     "",
 ]
 

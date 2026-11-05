@@ -14,8 +14,10 @@ Exit codes are Open-Ready's closed vocabulary (``status.py``): 0 ok, 1 fail,
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +40,17 @@ class Evidence:
     @property
     def approved(self) -> bool:
         return self.status == APPROVED
+
+
+#: Credentials the publisher never needs. A guard that asks "is this approved?"
+#: must not hand the checked repository's code a token it could publish with.
+_CREDENTIAL_VARS = frozenset({
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+})
+
+
+def _child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in _CREDENTIAL_VARS}
 
 
 def _publisher_argv(settings: Settings, candidate: Path, destination: str, licence: str) -> list[str]:
@@ -70,24 +83,13 @@ def _digest_from(stdout: str) -> str:
         results = data.get("results")
         if isinstance(results, list):
             for item in results:
-                if isinstance(item, dict) and str(item.get("digest", "")).startswith("sha256:"):
-                    return str(item["digest"])
+                if not isinstance(item, dict):
+                    continue
+                for key in ("candidate_digest", "digest"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.startswith("sha256:"):
+                        return value
     return ""
-
-
-def _recorded_digest(candidate: Path) -> str:
-    """Digest recorded in ``CANDIDATE.json``.
-
-    Only reported when the publisher check passed: that check re-derives the
-    digest from the frozen bytes and fails on a mismatch, so a passing result is
-    what makes the recorded value trustworthy. On its own it is self-reported.
-    """
-    try:
-        data = json.loads((candidate / "CANDIDATE.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    value = data.get("candidate_digest") if isinstance(data, dict) else None
-    return value if isinstance(value, str) and value.startswith("sha256:") else ""
 
 
 def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
@@ -119,21 +121,33 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
             candidate=str(candidate),
         )
 
-    result = runner.run(
-        _publisher_argv(settings, candidate, destination, settings.licence),
-        timeout=settings.approval_timeout_seconds,
-        cwd=str(repo),
-    )
+    # Run from a neutral directory: `python -m` puts the current directory first on
+    # sys.path, so a repository containing `openready/publisher.py` could answer its
+    # own approval check. The guard must not execute the code it is judging.
+    scratch = tempfile.mkdtemp(prefix="openready-check-")
+    try:
+        result = runner.run(
+            _publisher_argv(settings, candidate, destination, settings.licence),
+            timeout=settings.approval_timeout_seconds,
+            cwd=scratch,
+            env=_child_env(),
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     digest = _digest_from(result.stdout)
 
     if result.timed_out:
         return Evidence(ERROR, detail=result.detail, destination=destination,
                         candidate=str(candidate), digest=digest)
     if result.missing:
+        if not repo.is_dir():
+            detail = f"repository path does not exist: {repo}"
+        else:
+            detail = (f"{result.detail} — the openready package must be importable by "
+                      f"{settings.openready_python}")
         return Evidence(
             ERROR,
-            detail=f"{result.detail} — the openready package must be importable by "
-                   f"{settings.openready_python}",
+            detail=detail,
             destination=destination,
             candidate=str(candidate),
         )
@@ -169,11 +183,22 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
                 destination=destination,
                 candidate=str(candidate),
             )
-        verified_digest = digest or _recorded_digest(candidate)
-        if verified_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", verified_digest):
+        # An approval is bound to an artifact. Without a digest the evidence cannot
+        # be bound to anything, so it is not an approval — the module's own claim.
+        if not digest:
             return Evidence(
                 ERROR,
-                detail=f"publisher check reported a digest that is not sha256:<64 hex>: {verified_digest[:40]!r}",
+                detail=(
+                    "publisher check exited 0 without reporting a candidate digest; "
+                    "an approval that names no artifact cannot authorise one"
+                ),
+                destination=destination,
+                candidate=str(candidate),
+            )
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            return Evidence(
+                ERROR,
+                detail=f"publisher check reported a digest that is not sha256:<64 hex>: {digest[:40]!r}",
                 destination=destination,
                 candidate=str(candidate),
             )
@@ -182,7 +207,7 @@ def lookup(repo: Path, destination: str, settings: Settings) -> Evidence:
             detail="owner approval found",
             destination=destination,
             candidate=str(candidate),
-            digest=verified_digest,
+            digest=digest,
         )
     if result.returncode in (1, 2, 3):
         return Evidence(

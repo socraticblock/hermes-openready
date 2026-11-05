@@ -27,6 +27,11 @@ PUBLIC = "public"
 _MAX_SHELL_DEPTH = 12
 #: A wrapper chain longer than this is not a command an agent types by accident.
 _MAX_WRAPPERS = 64
+#: Shell reserved words and grouping characters that can precede a command.
+_RESERVED_WORDS = frozenset({
+    "time", "!", "{", "}", "(", ")", "if", "then", "elif", "else", "fi",
+    "do", "done", "while", "until", "for", "in", "case", "esac", "eval", "builtin",
+})
 
 VISIBILITY = "visibility"
 CREATE_PUBLIC = "create_public"
@@ -45,6 +50,8 @@ _URL_REPOS = re.compile(
 _URL_REPO_CREATE = re.compile(
     r"(?:api\.github\.com|github\.com)/(?:user|orgs/[A-Za-z0-9_.\-]+)/repos\b"
 )
+#: Endpoint that *creates* a repository (no owner/name segment).
+_CREATE_PATH = re.compile(r"(?:^|/)(?:user|orgs/[A-Za-z0-9_.\-]+)/repos/?$")
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,11 @@ def _visibility(tokens: list[str]) -> str:
     values = [value.strip().lower() for value in _flag_values(tokens, "--visibility")]
     if not values:
         return ""
+    # Shell quoting the tokeniser cannot resolve: bash turns `$'public'` into
+    # `public` but shlex leaves `$public`. An unresolved expansion is treated as
+    # public, because the guard cannot prove what it evaluates to.
+    if any("$" in value or "`" in value for value in values):
+        return PUBLIC
     if PUBLIC in values:
         return PUBLIC
     return values[-1]
@@ -202,25 +214,37 @@ def _data_payload(tokens: list[str]) -> str:
         elif token.startswith(("--data=", "--data-raw=", "--data-binary=", "--json=",
                                "--data-urlencode=")):
             chunks.append(token.split("=", 1)[1])
+        elif len(token) > 2 and token[:2] in {"-d"} and not token.startswith("--"):
+            # curl accepts an attached body: `-d@file` and `-d'{"a":1}'`.
+            chunks.append(token[2:])
     return " ".join(chunks)
 
 
 def _opaque_body(tokens: list[str]) -> bool:
     """True when the request body lives in a file the guard cannot read."""
     for index, token in enumerate(tokens):
+        value = ""
         if token in {"-d", "--data", "--data-raw", "--data-binary", "--json",
                      "--data-urlencode"} and index + 1 < len(tokens):
-            if tokens[index + 1].startswith("@"):
-                return True
+            value = tokens[index + 1]
         elif token.startswith(("--data=", "--data-raw=", "--data-binary=", "--json=",
                                "--data-urlencode=")):
-            if token.split("=", 1)[1].startswith("@"):
-                return True
+            value = token.split("=", 1)[1]
+        elif len(token) > 2 and token.startswith("-d") and not token.startswith("--"):
+            value = token[2:]
+        if value.startswith("@"):
+            return True
+        # `--data-urlencode name@file` reads the field value from a file.
+        if "@" in value and not value.lstrip().startswith("{"):
+            return True
     return False
 
 
 #: Wrappers that run another command, and how their own arguments are shaped.
-_WRAPPERS = frozenset({"sudo", "doas", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "env"})
+_WRAPPERS = frozenset({
+    "sudo", "doas", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "env",
+    "setsid", "script", "chroot", "unshare", "taskset", "ionice",
+})
 
 
 def _strip_wrapper(name: str, tokens: list[str]) -> list[str] | None:
@@ -250,6 +274,15 @@ def _strip_wrapper(name: str, tokens: list[str]) -> list[str] | None:
                 continue
             return rest[index:]
         return []
+    if name == "script":
+        index = 0
+        while index < len(rest) and rest[index].startswith("-"):
+            index += 2 if rest[index] in {"-c", "--command", "-T", "--log-timing"} else 1
+        # `script -qec 'gh …' /dev/null`: the command arrives as one quoted token.
+        if index < len(rest) and " " in rest[index]:
+            inner = _split(rest[index])
+            return None if inner is None else inner + rest[index + 1:]
+        return rest[index:]
     if name == "timeout":
         index = 0
         while index < len(rest) and rest[index].startswith("-"):
@@ -327,6 +360,33 @@ def _repo_target(path: str) -> str:
     return ""
 
 
+def _fields_text(tokens: list[str]) -> str:
+    return " ".join(_api_fields(tokens)).lower().replace(" ", "")
+
+
+def _body_public(tokens: list[str]) -> bool:
+    """A body that asks for a public repository, in either API spelling."""
+    body = _fields_text(tokens)
+    return "visibility=public" in body or "private=false" in body
+
+
+def _body_private(tokens: list[str]) -> bool:
+    body = _fields_text(tokens)
+    return "visibility=private" in body or "private=true" in body
+
+
+def _effective_method(tokens: list[str], *, body_flags: bool) -> str:
+    """The method the client will actually use.
+
+    `gh api` switches to POST as soon as a field is supplied, and `curl` does the
+    same for `-d`/`--json`. Treating "no -X" as GET is how a create slips past.
+    """
+    method = (_flag_value(tokens, "--method", "-X") or "").upper()
+    if method:
+        return method
+    return "POST" if body_flags else "GET"
+
+
 def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | None:
     if len(args) >= 2 and args[0] == "repo" and args[1] in {"edit", "create"}:
         verb, rest = args[1], args[2:]
@@ -341,14 +401,21 @@ def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | No
         return None
 
     if len(args) > 1 and args[1] == "graphql":
-        # `gh api graphql -f query='mutation { updateRepository(… visibility: PUBLIC) }'`
-        query = " ".join(_api_fields(args[2:])).lower()
+        # A GraphQL mutation can flip visibility without naming /repos, and both
+        # `--input` and `-F query=@file` hide the mutation from the guard.
+        rest = args[2:]
+        fields = _api_fields(rest)
+        if _has_flag(rest, "--input") or any("@" in field for field in fields):
+            return Intent(API_VISIBILITY, "", command)
+        query = " ".join(fields).lower()
         if "visibility" in query and PUBLIC in query:
             return Intent(API_VISIBILITY, "", command)
         return None
 
     rest = args[1:]
-    method = (_flag_value(rest, "--method", "-X") or "GET").upper()
+    fields = _api_fields(rest)
+    body_flags = bool(fields) or _has_flag(rest, "--input")
+    method = _effective_method(rest, body_flags=body_flags)
     path = next(
         (token for token in _positionals(rest)
          if "/repos" in token or token.startswith("repos")),
@@ -357,15 +424,21 @@ def _classify_gh(args: list[str], global_repo: str, command: str) -> Intent | No
     if method not in {"PATCH", "POST"} or not path:
         return None
 
-    public_field = any(
-        field.lower().startswith("visibility=public") for field in _api_fields(rest)
-    )
-    is_update_path = "/repos/" in path or path.startswith("repos/")
-    if public_field:
-        if is_update_path:
-            return Intent(API_VISIBILITY, _repo_target(path), command)
+    opaque = _has_flag(rest, "--input") or any("@" in field for field in fields)
+
+    # Creating a repository: GitHub defaults `private` to false, so silence means
+    # public. Only an explicit private request passes.
+    if method == "POST" and _CREATE_PATH.search(path):
+        if _body_private(rest):
+            return None
         return Intent(CREATE_PUBLIC, "", command)
-    if _has_flag(rest, "--input") and is_update_path:
+
+    is_update_path = "/repos/" in path or path.startswith("repos/")
+    if not is_update_path:
+        return None
+    if _body_public(rest):
+        return Intent(API_VISIBILITY, _repo_target(path), command)
+    if opaque:
         # An opaque body could carry `visibility: public`; the guard cannot read
         # it, so the call is escalated instead of silently passed.
         return Intent(API_VISIBILITY, _repo_target(path), command)
@@ -376,9 +449,9 @@ def _classify_tokens(tokens: list[str], command: str, depth: int = 0) -> Intent 
     if not tokens:
         return None
     if depth > _MAX_SHELL_DEPTH:
-        # A shell nested this deep is not honest work. Fail closed when the text
-        # still names a public flip; otherwise pass rather than block blindly.
-        return Intent(VISIBILITY, "", command) if "public" in command.lower() else None
+        # A shell nested this deep is not honest work. At this point the guard
+        # cannot classify what it is looking at, so it refuses.
+        return Intent(VISIBILITY, "", command)
 
     # Wrappers are stripped iteratively: `sudo sudo sudo gh …` is one gh command,
     # and spending the nesting budget on it would itself be a bypass.
@@ -396,7 +469,19 @@ def _classify_tokens(tokens: list[str], command: str, depth: int = 0) -> Intent 
             return None
         tokens = rest
     else:
-        return Intent(VISIBILITY, "", command) if "public" in command.lower() else None
+        return Intent(VISIBILITY, "", command)
+
+    # Shell reserved words and grouping characters are syntax, not the command:
+    # `time gh …`, `{ gh …; }`, `(gh …)`, `then gh …`, `! gh …` all run gh.
+    while tokens:
+        head = tokens[0].strip("(){};! \t")
+        if head.lower() not in _RESERVED_WORDS and head:
+            break
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    tokens[0] = tokens[0].strip("(){};! \t")
+    tokens[-1] = tokens[-1].rstrip(")}; \t")
 
     tokens = _strip_assignments(tokens)
     if not tokens:
@@ -438,23 +523,28 @@ def _classify_tokens(tokens: list[str], command: str, depth: int = 0) -> Intent 
 
 
 def _classify_curl(args: list[str], command: str) -> Intent | None:
-    """A direct REST visibility change is a publish attempt whether or not `gh` runs it."""
-    method = (_flag_value(args, "--request", "-X") or "GET").upper()
-    if method not in {"PATCH", "POST"}:
-        return None
+    """A direct REST call is a publish attempt whether or not `gh` runs it."""
     payload = _data_payload(args).lower()
     opaque = _opaque_body(args)
-    mentions_public = "visibility" in payload and PUBLIC in payload
+    body_flags = bool(payload) or _has_flag(args, "--json") or opaque
+    method = _effective_method(args, body_flags=body_flags)
+    if method not in {"PATCH", "POST"}:
+        return None
+    # Creating a repository is a publish even when the body says nothing about
+    # visibility: GitHub defaults `private` to false.
+    if method == "POST" and any(_URL_REPO_CREATE.search(token) for token in args):
+        if "private" in payload and "true" in payload:
+            return None
+        return Intent(CREATE_PUBLIC, "", command)
+    mentions_public = ("visibility" in payload and PUBLIC in payload) or (
+        "private" in payload and "false" in payload
+    )
     if not mentions_public and not opaque:
         return None
     if any("/graphql" in token for token in args):
-        # A GraphQL mutation can flip visibility without naming /repos.
-        return Intent(API_VISIBILITY, "", command) if mentions_public else None
-    if method == "POST":
-        # `POST /user/repos` or `POST /orgs/<org>/repos` creates a public repo.
-        if any(_URL_REPO_CREATE.search(token) for token in args):
-            return Intent(CREATE_PUBLIC, "", command)
-        return None
+        # Opaque GraphQL is escalated: a mutation can flip visibility, and the
+        # body may live in a file the guard cannot read.
+        return Intent(API_VISIBILITY, "", command)
     urls = [token for token in args if _URL_REPOS.search(token)]
     if not urls:
         return None
@@ -494,17 +584,31 @@ def decide(intent: Intent | None, *, evidence) -> Directive:
     destination = intent.destination() or getattr(evidence, "destination", "") or "the target repository"
 
     if getattr(evidence, "status", "error") == "approved":
-        # Scope the "always allow" key to this artifact: a generic key would let one
-        # approval authorise a different candidate or destination later.
+        # An approval is bound to one artifact and one destination. A command whose
+        # target cannot be resolved (a bare `gh repo create newname`, a GraphQL
+        # mutation) cannot be bound, so it is never approved — otherwise an approval
+        # for repo A would authorise publishing repo B.
+        if intent.kind in {CREATE_PUBLIC, API_VISIBILITY} and not intent.target:
+            return Directive(
+                "block",
+                message=(
+                    f"hermes-openready blocked `{intent.command}`.\n"
+                    "The approval check passed, but this command does not name the "
+                    "repository it would publish, so the approval cannot be bound to it.\n"
+                    "Next: name the target (owner/name, or `-R owner/name`) and retry."
+                ),
+            )
+        # Scope the "always allow" key to this artifact and destination: a generic
+        # key would let one approval authorise a different candidate later.
         digest = str(getattr(evidence, "digest", "") or "")
         key = f"hermes-openready:publish:{intent.target or 'unknown'}"
         if digest.startswith("sha256:"):
-            key += f":{digest[7:19]}"
+            key += f":{digest}"
         return Directive(
             "approve",
             message=(
                 f"hermes-openready: an owner approval covers {destination} "
-                f"({digest or 'digest recorded'}). "
+                f"({digest}). "
                 "Publication is still the owner's decision — confirm to allow this command."
             ),
             rule_key=key,

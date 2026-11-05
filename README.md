@@ -77,43 +77,58 @@ repository's public surface:
 | visibility change | `gh repo edit owner/repo --visibility public` |
 | public creation | `gh repo create name --public` |
 | API equivalent | `gh api -X PATCH /repos/owner/repo -f visibility=public` |
+| REST create (defaults public) | `gh api /user/repos -f name=x` — silence means public |
+| REST visibility flip | `gh api -X PATCH /repos/o/r -f private=false` |
 | direct REST | `curl -X PATCH https://api.github.com/repos/owner/repo -d '{"visibility":"public"}'` |
-| behind a wrapper | `sudo …`, `timeout 30 …`, `env -S "…"`, `bash -lc "…"` |
+| behind a wrapper | `sudo …`, `timeout 30 …`, `env -S "…"`, `bash -lc "…"`, `setsid …`, `script -qec "…"` |
+| behind shell syntax | `time gh …`, `! gh …`, `{ gh …; }`, `(gh …)`, `then gh …` |
 | in a command list | `git status; gh repo edit owner/repo --visibility public` |
 
 It sees through absolute paths, `--repo/-R`, `--flag=value`, attached short flags
-(`-XPOST`), stacked shell flags (`bash -lc`), and the wrappers above. It does not try to
-recognise every possible way to publish: a grammar that guesses produces false blocks, and a
-guard that blocks honest work gets switched off.
+(`-XPOST`, `-d@body.json`), stacked shell flags (`bash -lc`), and the wrappers above. It does
+not try to recognise every possible way to publish: a grammar that guesses produces false
+blocks, and a guard that blocks honest work gets switched off. Where it cannot resolve a
+value — `--visibility $'public'`, `-F visibility=@file`, `--input body.json` — it refuses
+rather than assuming the harmless reading.
 
 Decision table:
 
 - **no approval** → `block`, with the next step named (candidate → verify → owner records).
 - **approval covers this exact digest and destination** → `approve`: the command still
   needs a human confirmation. Approval is evidence, not permission.
+- **approval covers something else** → `block`. A command that does not name the repository
+  it would publish (`gh repo create newname`, a GraphQL mutation) cannot be bound to an
+  approval, so it is never approved on the strength of one.
 - **check could not run** (missing binary, timeout, malformed config, classifier error) →
   `block`. The guard fails closed, and says why.
 
 The approval lookup is `python -m openready.publisher check`, which re-derives the digest
 from the candidate's own bytes and ignores approvals asserted inside the candidate. This
 package does not re-implement that logic — it asks the tool, and treats every non-answer
-(exit 1/2/3/64, timeout, crash) as a refusal.
+(exit 1/2/3/64, timeout, crash) as a refusal. The check runs from a temporary directory with
+GitHub credentials removed from its environment: `python -m` puts the working directory
+first on `sys.path`, and the guard must not execute the repository it is judging.
 
 ## What this does not protect against
 
 Stated plainly, because a guard that oversells itself is worse than none:
 
-- **Other tools.** Only `terminal` is inspected. An MCP server, a plugin tool, or a browser
-  action that changes visibility is out of scope.
+- **Other tools.** Only `terminal` is inspected. Two core paths reach a shell without it —
+  the code execution tool (which calls `terminal` over an internal RPC socket) and stdin
+  written into a live PTY by `process_manage` — plus any MCP server or browser action. If
+  those are in an agent's toolset, this hook is not the control that stops them.
 - **Obfuscation.** `$(echo gh) repo edit …`, a base64 payload, or a script the agent writes
   and then runs. The grammar catches the shapes in the table, not every shell construction.
 - **A fake approval.** The guard trusts the publisher's own JSON: if `openready_python` is
   pointed at something that prints a plausible `check` result, the guard will believe it.
-  It refuses silent success (exit 0 with no check JSON is an error), but it cannot
-  authenticate the interpreter — that is a configuration responsibility.
-- **Opaque API bodies.** `gh api … --input body.json` against a repo endpoint is escalated,
-  because the guard cannot read the body. A PATCH that only changes a description will
-  still ask for confirmation; that is the deliberate cost of not guessing.
+  It refuses silent success (exit 0 with no check JSON, or with no digest, is an error), it
+  never runs the check from inside the repository, and it strips GitHub tokens from the
+  child's environment — but it cannot authenticate the interpreter. That is a configuration
+  responsibility.
+- **Opaque API bodies.** `gh api … --input body.json`, `curl --data @file`, and
+  `--data-urlencode field@file` against a repo endpoint are escalated, because the guard
+  cannot read the body. A PATCH that only changes a description will still ask for
+  confirmation; that is the deliberate cost of not guessing.
 - **A writable approval store.** An approval record is a file. Anyone who can write it can
   rewrite the record and its digest together. Keep it where only the owner writes.
 - **Anything after the fact.** The guard refuses a command; it does not audit what happened
@@ -123,7 +138,7 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **129 passed** — grammar table (39 publish shapes, 31 non-publish shapes),
+- `pytest`: **162 passed** — grammar table (63 publish shapes, 35 non-publish shapes),
   decision table, runner failure modes (including a grandchild holding the pipe open),
   settings precedence, tool envelopes, evidence lookup.
 - `hermes plugins validate`: every check green, including `capability probe`
@@ -150,7 +165,7 @@ openready_plugin/
   evidence.py            read-only approval lookup
   tools.py               tool schemas and handlers
   hook.py                the publish guard
-tests/                   120 tests, no network, no real CLI required
+tests/                   162 tests, no network, no real CLI required
 docs/RESEARCH.md         why each decision was made, with source handles
 ```
 

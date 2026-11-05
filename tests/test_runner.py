@@ -20,6 +20,24 @@ def test_timeout_is_reported_and_bounded():
     assert result.returncode == 124
 
 
+def test_a_grandchild_that_outlives_its_parent_is_not_a_success(tmp_path):
+    """A child can exit 0 while a grandchild it started keeps stdout open."""
+    import time
+
+    script = tmp_path / "parent.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print('done')\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    result = run([sys.executable, str(script)], timeout=1.0)
+    assert result.timed_out is True
+    assert result.ok is False
+    assert time.monotonic() - started < 10
+
+
 def test_timeout_kills_descendants_that_hold_the_pipe():
     """A grandchild inheriting stdout must not extend the deadline."""
     import time
