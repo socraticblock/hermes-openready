@@ -12,7 +12,12 @@ from openready_plugin.settings import Settings
 
 DIGEST = "sha256:" + "d" * 64
 CHECK_OK = json.dumps(
-    {"command": "check", "exit_code": 0, "approval_file": "/tmp/approvals.json"}
+    {
+        "command": "check",
+        "exit_code": 0,
+        "approval_file": "/tmp/approvals.json",
+        "candidate_digest": DIGEST,
+    }
 )
 
 
@@ -74,12 +79,21 @@ def test_exit_code_false_is_not_success(repo, monkeypatch):
 
 
 def test_malformed_digest_is_not_approval(repo, monkeypatch):
-    payload = json.dumps({"command": "check", "exit_code": 0, "approval_file": "x"})
+    payload = json.dumps({"command": "check", "exit_code": 0, "approval_file": "x",
+                          "candidate_digest": "sha256:nothex"})
     monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=payload))
-    monkeypatch.setattr(evidence, "_recorded_digest", lambda _c: "sha256:nothex")
     found = evidence.lookup(repo, "https://github.com/a/b", _settings())
     assert found.status == evidence.ERROR
     assert "sha256" in found.detail
+
+
+def test_exit_zero_without_a_digest_is_not_an_approval(repo, monkeypatch):
+    """An approval that names no artifact cannot authorise one."""
+    payload = json.dumps({"command": "check", "exit_code": 0, "approval_file": "x"})
+    monkeypatch.setattr(evidence.runner, "run", lambda *a, **k: _result(0, stdout=payload))
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.status == evidence.ERROR
+    assert "without reporting a candidate digest" in found.detail
 
 
 def test_exit_zero_without_check_json_is_an_error(repo, monkeypatch):
@@ -133,4 +147,33 @@ def test_argv_shape_is_module_invocation_not_a_shell_string(repo, monkeypatch):
     argv = captured["argv"]
     assert argv[1:3] == ["-m", "openready.publisher"]
     assert "--candidate" in argv and "--destination" in argv and "--licence" in argv
-    assert captured["cwd"] == str(repo)
+    # Never run from the repository: `python -m` would put it on sys.path first.
+    assert captured["cwd"] != str(repo)
+    assert "openready-check-" in captured["cwd"]
+
+
+def test_a_repository_cannot_answer_its_own_approval_check(tmp_path, monkeypatch):
+    """A repo-local `openready/publisher.py` must not run as the approval check."""
+    marker = tmp_path / "forged-ran"
+    package = tmp_path / "openready"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "publisher.py").write_text(
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+        'print(json.dumps({"command": "check", "exit_code": 0, '
+        '"approval_file": "/tmp/forged.json", '
+        '"candidate_digest": "sha256:" + "a" * 64}))\n'
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    candidate = tmp_path / ".openready-candidate"
+    candidate.mkdir()
+    monkeypatch.setattr(evidence.shutil, "which", lambda _name: "/usr/bin/python3")
+    found = evidence.lookup(
+        tmp_path,
+        "https://github.com/a/b",
+        _settings(openready_python="/usr/bin/python3", approval_timeout_seconds=20),
+    )
+    assert found.status != evidence.APPROVED
+    assert not marker.exists(), "the guard executed code from the repository it was judging"

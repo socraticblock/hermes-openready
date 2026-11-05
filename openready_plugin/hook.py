@@ -1,9 +1,13 @@
 """The publish guard: a ``pre_tool_call`` hook.
 
-It inspects exactly one tool — ``terminal`` — because that is the only surface
-through which an agent can change a repository's public state. The handler is a
-thin adapter: classify, gather evidence, apply the decision table, return a
-directive. No writes, no state, no caching.
+It inspects the ``terminal`` tool, which is where an agent runs ``gh`` and ``curl``.
+It is not a sandbox: a command that reaches a shell another way — the code
+execution tool's RPC path, stdin written into a live PTY by ``process_manage``, an
+MCP server, a browser session — is outside this hook. That boundary is stated in
+the README rather than implied away.
+
+The handler is a thin adapter: classify, gather evidence, apply the decision
+table, return a directive. No writes, no state, no caching.
 
 Failure policy: a guard that errors must not silently pass a publish command.
 The handler therefore catches everything; if the command looked like a publish
@@ -51,14 +55,28 @@ def pre_tool_call(**kwargs):
 
     try:
         conf = settings.load()
+    except Exception as exc:
+        return {"action": "block",
+                "message": _fail_closed(command, f"configuration: {type(exc).__name__}: {exc}")}
+
+    # A malformed configuration is not something to normalise quietly: an invalid
+    # licence or an unreadable host config changes which approvals apply. Refuse
+    # before looking one up.
+    if conf.problems:
+        return {
+            "action": "block",
+            "message": (
+                f"hermes-openready blocked `{command}`: the guard configuration is invalid "
+                f"({'; '.join(conf.problems)}). Fix it before publishing — the guard will not "
+                "approve a command it cannot evaluate."
+            ),
+        }
+
+    try:
         repo = _repo_path(args)
         destination = intent.destination() or conf.destination
         found = evidence.lookup(repo, destination, conf)
-        directive = publish.decide(intent, evidence=found)
-        result = directive.as_hook_result()
-        if result and conf.problems:
-            result["message"] += "\nGuard configuration problems: " + "; ".join(conf.problems)
-        return result
+        return publish.decide(intent, evidence=found).as_hook_result()
     except Exception as exc:
         return {"action": "block", "message": _fail_closed(command, f"{type(exc).__name__}: {exc}")}
 

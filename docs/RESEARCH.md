@@ -185,10 +185,10 @@ Host: WSL2, Open-Ready `0.1.0-p0`, Python 3.14.9, pytest 9.2.0.
 **Unit suite** — `python -m pytest -q` in `~/projects/hermes-openready`:
 
 ```
-129 passed in 1.04s
+162 passed in 2.01s
 ```
 
-Covers: 39 publish shapes classified, 31 non-publish shapes passed (including
+Covers: 63 publish shapes classified, 35 non-publish shapes passed (including
 `echo "gh repo edit --visibility public"`, `git push origin main`, `gh api` GET,
 `-f visibility=private`, `GH_TOKEN=x gh repo view`, `env -u FOO git status`), decision
 table (approved → `approve`, missing → `block`, error → `block`), runner (missing binary,
@@ -309,6 +309,72 @@ output. Ten findings, all acted on:
 22. `openready_available()` raised on `~no-such-user/openready` (expanduser raises
     `RuntimeError`); it now returns `False`, and every handler is wrapped so no path can
     raise into dispatch.
+
+**Round 4** — two independent source audits of the public commit `03bf629`, one by GPT and
+one by a second Hermes lane (`assistant-1`), the second with the repository cloned and the
+classifier executed. They converged on the same first finding, which is the one that
+mattered most: **the guard was protecting the wrong default.** Findings and what changed:
+
+23. `gh api /user/repos -f name=example` and `curl -X POST …/user/repos -d '{"name":"x"}'`
+    passed. GitHub defaults `private` to `false` when a repository is created, so silence
+    *is* a public creation. The create branch required the word `public` in the body; the
+    test suite had blessed the omission as a non-publish shape. Creation endpoints now
+    default to `create_public` unless the body explicitly says `private: true` (or
+    `visibility: private`), through both clients.
+24. `gh api -X PATCH /repos/a/b -f private=false` passed: only the `visibility=public`
+    spelling was recognised. `private=false` is now the same intent.
+25. Implicit methods were read as GET. `gh api` switches to POST as soon as a field is
+    supplied and `curl --json`/`-d` do the same, so `gh api /user/repos -f name=x` (no `-X`)
+    slipped through the API branch entirely. The effective method is now inferred from the
+    client's own semantics.
+26. `gh repo edit a/b --visibility $'public'` passed: bash expands ANSI-C quoting before
+    `gh` runs, `shlex` leaves `$public`. Any unresolved `$` or backtick in a visibility
+    value is treated as public, because the guard cannot prove what it evaluates to.
+27. `time gh …`, `! gh …`, `{ gh …; }`, `(gh …)`, `then gh …`, `setsid …`, `script -qec "…"`
+    passed: only a fixed wrapper list was stripped, and shell syntax is not the command.
+    Reserved words and grouping characters are stripped, and `setsid`/`script`/`chroot`/
+    `unshare` joined the wrapper table (`script` re-splits its quoted command).
+28. `curl -XPATCH … -d'{"visibility":"public"}'` (attached body) and
+    `--data-urlencode visibility@payload.txt` (field value from a file) passed. Both are
+    read now; an `@` that is not inline JSON marks the body opaque and escalates.
+29. `gh api graphql --input mutation.json`, `gh api graphql -F query=@mutation.graphql`, and
+    `curl …/graphql --json @mutation.json` passed. A GraphQL body the guard cannot read is
+    now escalated, and so is any field value containing `@`.
+30. A wrapper chain past the budget, or a shell nested past the depth limit, passed when the
+    text did not contain the word `public`. Both limits now refuse unconditionally: at that
+    point the guard has admitted it cannot classify.
+31. **The approval check executed the repository it was judging.** `python3 -m
+    openready.publisher` ran with `cwd=<repo>`, and `-m` puts the working directory first on
+    `sys.path` — a repository containing `openready/publisher.py` answered its own approval
+    check and returned a forged `check` result. Reproduced, then fixed: the check runs from a
+    temporary directory, and GitHub token variables are removed from the child's environment.
+    Pinned by a test that plants a repo-local `publisher.py` and asserts it never runs.
+32. An approval for repository A authorised `gh repo create unrelated-repo --public`: the
+    command names no owner/repo, so the hook fell back to the configured destination and
+    approved against A's evidence. A command whose target cannot be resolved is now never
+    approved, and the rule key carries the full digest rather than a 12-character prefix.
+33. A malformed configuration was normalised to defaults and the guard continued to the
+    approval lookup, contradicting the README's fail-closed claim. Configuration problems
+    now block before any lookup.
+34. `runner` enforced its timeout on `proc.wait()` only: a child that exited 0 while a
+    grandchild held the pipes returned `ok=True` with an empty capture after two 5-second
+    joins. One monotonic deadline now governs exit *and* draining; if readers are still
+    alive at the deadline the process group is killed and the result is `timed_out`. The
+    group id is captured at start, because after the direct child exits its pid no longer
+    resolves and a surviving descendant would escape `killpg`.
+35. An approved result with **no digest** was accepted (the `if verified_digest and …`
+    guard skipped the check on an empty string), and `CANDIDATE.json` was read as a fallback
+    source. Both removed: an approval that names no artifact is an error.
+36. A missing working directory was reported as "the openready package must be importable".
+    It now says the path does not exist.
+37. Governance: no CI, no `SECURITY.md`, no private disclosure path for a security tool.
+    Added a GitHub Actions matrix (3.11/3.12/3.13) and a security policy that names the
+    in-scope and out-of-scope claims.
+
+The audits also stated the boundary this hook does not cover, and the README now says it
+without softening: the code execution tool reaches `terminal` over an internal RPC socket
+that bypasses dispatch, and `process_manage` can write into a live PTY. Those are named as
+out of scope rather than implied away.
 
 **Bugs the evidence caught during the build** (all fixed, each now pinned by a test):
 

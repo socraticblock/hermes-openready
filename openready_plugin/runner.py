@@ -21,6 +21,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -62,11 +63,15 @@ class RunResult:
         return text
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Kill the child and anything it started, without raising."""
+def _kill_group(pgid: int | None, proc: subprocess.Popen) -> None:
+    """Kill the child and anything it started, without raising.
+
+    The group id is captured at start: once the direct child has exited its pid no
+    longer resolves, and a descendant holding the pipe would survive.
+    """
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        if pgid is not None and hasattr(os, "killpg"):
+            os.killpg(pgid, signal.SIGKILL)
         else:  # pragma: no cover - non-POSIX
             proc.kill()
     except (ProcessLookupError, PermissionError, OSError):
@@ -132,6 +137,10 @@ def run(
                          detail=f"{type(exc).__name__}: {exc}")
 
     captured: dict[str, tuple[bytes, int]] = {}
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:  # pragma: no cover - the child vanished already
+        pgid = None
 
     def drain(name: str, stream) -> None:
         captured[name] = _drain(stream, MAX_CAPTURE_BYTES)
@@ -144,18 +153,29 @@ def run(
         reader.start()
 
     timed_out = False
+    # One monotonic deadline governs process exit *and* pipe draining. A child can
+    # exit 0 while a grandchild it started keeps stdout open; joining readers with
+    # a fresh grace period would then report success with an empty capture.
+    deadline = time.monotonic() + max(0.0, float(timeout))
     try:
-        proc.wait(timeout=timeout)
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
-        _kill_group(proc)
+        _kill_group(pgid, proc)
         try:
             proc.wait(timeout=_KILL_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             pass
 
     for reader in readers:
-        reader.join(timeout=_KILL_GRACE_SECONDS)
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+    if any(reader.is_alive() for reader in readers):
+        # The output pipes are still held open past the deadline. The capture is
+        # incomplete, so the result cannot be reported as a clean exit.
+        _kill_group(pgid, proc)
+        for reader in readers:
+            reader.join(timeout=_KILL_GRACE_SECONDS)
+        timed_out = True
 
     out_bytes, out_total = captured.get("out", (b"", 0))
     err_bytes, err_total = captured.get("err", (b"", 0))
