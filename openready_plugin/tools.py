@@ -204,7 +204,7 @@ def _run_tool(
 PROJECT_MARKER = "openready.project.json"
 
 #: Plugin-chosen packet location, relative to the validated project root.
-PACKET_RELPATH = (".openready", "packets", "packet.json")
+PACKET_RELPATH = (".openready-private", "packets", "packet.json")
 
 
 def _refused(message: str) -> tuple[None, str]:
@@ -304,6 +304,14 @@ def handle_candidate(args: dict, **_kw) -> str:
             "caller-named path. Run `openready candidate --out <tree>` yourself for a "
             "separate-tree candidate.",
         )
+    # Open-Ready resolves the default export path. A symlink there can redirect
+    # the nominally in-project export outside the repository.
+    default_out = repo / settings.CANDIDATE_DIRNAME
+    if default_out.is_symlink():
+        return _error_envelope(
+            "openready_candidate",
+            f"{default_out} is a symbolic link; refusing to export through it",
+        )
     return _run_tool("openready_candidate", argv, cwd=repo, conf=conf)
 
 
@@ -346,8 +354,17 @@ def handle_verify(args: dict, **_kw) -> str:
         argv += ["--packet", str(packet_path)]
     if args.get("expected_digest"):
         argv += ["--expected-digest", str(args["expected_digest"])]
-    return _run_tool("openready_verify", argv, cwd=candidate.parent, conf=conf,
-                     extra={"packet_path": str(packet_path)} if packet_path else None)
+    result = runner.run(argv, timeout=conf.timeout_seconds, cwd=str(candidate.parent))
+    extra = None
+    if packet_path is not None:
+        # The CLI may fail before it writes. A requested location is not a
+        # successfully written release packet.
+        written = packet_path.is_file() and not packet_path.is_symlink()
+        extra = {"packet_target": str(packet_path), "packet_written": written}
+        if written:
+            extra["packet_path"] = str(packet_path)
+    return _envelope("openready_verify", result, data=result.json(),
+                     problems=conf.problems, extra=extra)
 
 
 @_guard("openready_gate")
