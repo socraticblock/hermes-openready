@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from . import childenv
+
 MAX_CAPTURE_BYTES = 200_000
 _CHUNK = 65_536
 _KILL_GRACE_SECONDS = 5.0
@@ -129,7 +131,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
-            env=dict(env) if env is not None else None,
+            env=dict(env) if env is not None else childenv.minimal(),
             start_new_session=True,
         )
     except FileNotFoundError:

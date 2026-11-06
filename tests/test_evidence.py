@@ -177,3 +177,24 @@ def test_a_repository_cannot_answer_its_own_approval_check(tmp_path, monkeypatch
     )
     assert found.status != evidence.APPROVED
     assert not marker.exists(), "the guard executed code from the repository it was judging"
+
+
+def test_the_approval_check_child_gets_no_provider_keys(repo, monkeypatch):
+    """The guard's own child is the one that must never see a credential."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-secret")
+    monkeypatch.setenv("OPENREADY_MARKER", "kept")
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return RunResult(tuple(argv), 0, CHECK_OK, "")
+
+    monkeypatch.setattr(evidence.runner, "run", fake_run)
+    found = evidence.lookup(repo, "https://github.com/a/b", _settings())
+    assert found.approved is True, found.detail
+    env = captured["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
+    assert env.get("OPENREADY_MARKER") == "kept"
