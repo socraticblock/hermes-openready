@@ -70,3 +70,12 @@ def test_host_config_is_ignored_when_absent(monkeypatch):
     monkeypatch.undo()
     conf = settings.load()
     assert conf.problems == ()
+
+
+def test_a_configured_candidate_dir_is_reported_and_ignored(monkeypatch):
+    """The setting exists for compatibility; Open-Ready fixes the name, so it is not honoured."""
+    monkeypatch.setattr(settings, "_config_settings", lambda: {"candidate_dir": "custom-cand"})
+    monkeypatch.setattr(settings, "_env_settings", lambda: {})
+    resolved = settings.load()
+    assert resolved.candidate_dir == settings.CANDIDATE_DIRNAME
+    assert any("candidate_dir" in problem for problem in resolved.problems)

@@ -8,7 +8,9 @@ The plugin is the Hermes-facing half of [Open-Ready](https://github.com/socratic
 It registers five tools and one `pre_tool_call` guard. There is no publish path in this
 package: no push, no visibility change, no upload. The only files any tool writes are
 Open-Ready's own outputs — a candidate directory, and, if the caller asks for one, a
-release packet at a path it names.
+release packet. Neither is a caller-named path: the candidate goes to Open-Ready's default
+directory, and a packet, when asked for with `write_packet: true`, goes to a path this plugin
+chooses inside the repository.
 
 ## The problem it solves
 
@@ -61,17 +63,61 @@ Malformed values are reported in tool output and in guard messages, never silent
   current publication status. Read-only.
 - `openready_candidate` — export an **unapproved** candidate. Writes only the candidate
   directory.
-- `openready_verify` — verify a frozen candidate and emit its unapproved release packet.
+- `openready_verify` — verify a frozen candidate and emit its unapproved release packet. With
+  `write_packet: true` it also writes the packet to `<repo>/.openready/packets/packet.json`.
 - `openready_gate` — read-only: what would the guard decide for this destination now?
 
 Every tool result carries `"publication": "NOT_APPROVED"` and the note that exit 0 never
 means safe to publish. Open-Ready's exit codes are preserved verbatim: `0` OK, `1` FAIL,
 `2` NEEDS_HUMAN, `3` NOT_RUN, `64` USAGE. Only `0` from the publisher check is an approval.
 
+## Where the plugin is allowed to write
+
+No tool argument names a place to write. A model-supplied path is an arbitrary-write
+primitive: a tool call could put files anywhere the host user can write, and checking that
+the path is "inside something" only relocates the problem to whatever the caller named.
+
+**The candidate.** `openready_candidate` takes no `out`. Open-Ready's own contract decides
+this: a candidate must be a separate tree, and the only in-project location it permits is its
+default candidate directory (`src/openready/candidate.py`, `export()`). So the only value a
+wrapper can pass without contradicting the CLI is the default. Verified against the installed
+CLI `0.1.0-p0`: `--out <repo>/export/cand` exits 1 with `candidate.destination`, "…is inside
+the project; a candidate must be a separate tree, and the only in-project location permitted
+is .openready-candidate/". A re-export over an existing default directory also fails there,
+with "destination must be absent or an empty directory" — the plugin does not paper over it.
+
+**The packet.** `openready_verify` takes no `packet` path; it takes `write_packet: true`, and
+the plugin writes to `<repo>/.openready/packets/packet.json`, a name it chooses. It refuses if
+that file already exists, and it refuses entirely when the candidate is not the directory this
+plugin's export writes, because then there is no repository to derive — the answer is no
+rather than a guess. The path is never inside the candidate: a packet written there would
+mutate the frozen tree that was just digested. `write_packet` exists because the packet is
+about 15 KB and a tool result is bounded at 12 KB, so the on-disk copy is the one a reviewer
+can actually read.
+
+If you need a candidate somewhere else, or a packet somewhere else, run the CLI:
+`openready candidate --path <repo> --out <tree>` and `openready verify --candidate <dir>
+--packet <file>`. That is the owner's decision, made outside the agent's tool surface.
+
+## What a child process sees
+
+Every process this plugin starts — the five tools and the approval check alike — runs with
+an allowlisted environment, not the host's: `PATH`, `HOME`, `LANG`, `LC_*`, `VIRTUAL_ENV`,
+`TMPDIR`/`TMP`/`TEMP` and `OPENREADY_*`. Provider keys, cloud credentials and GitHub tokens
+are absent because they are not on the list, not because someone remembered to strip them.
+The rule lives in one place, `openready_plugin/childenv.py`.
+
+One consequence worth knowing: a host that makes `openready` importable only through
+`PYTHONPATH` will need `openready_python` pointed at an interpreter that can import it
+without one (a virtualenv, or a pip install). `PYTHONPATH` is withheld on purpose — it is a
+code-loading path, and the child already runs a program the plugin did not write.
+
 ## The guard
 
-`pre_tool_call` inspects the `terminal` tool only, and only commands that change a
-repository's public surface:
+`pre_tool_call` inspects the `terminal` tool only, and only publish attempts it recognises:
+commands written as `gh`, `gh api` or `curl`. Anything else — another tool, a script the
+agent writes and then runs, an unrecognised shell construction — is outside what this guard
+decides. The shapes it does recognise, which would change a repository's public surface:
 
 | Shape | Example |
 | --- | --- |
@@ -124,15 +170,19 @@ Stated plainly, because a guard that oversells itself is worse than none:
 - **A fake approval.** The guard trusts the publisher's own JSON: if `openready_python` is
   pointed at something that prints a plausible `check` result, the guard will believe it.
   It refuses silent success (exit 0 with no check JSON, or with no digest, is an error), it
-  never runs the check from inside the repository, and it strips GitHub tokens from the
-  child's environment — but it cannot authenticate the interpreter. That is a configuration
-  responsibility.
+  never runs the check from inside the repository, and the child gets an allowlisted
+  environment with no GitHub tokens in it — but it cannot authenticate the interpreter.
+  That is a configuration responsibility.
 - **Opaque API bodies.** `gh api … --input body.json`, `curl --data @file`, and
   `--data-urlencode field@file` against a repo endpoint are escalated, because the guard
   cannot read the body. A PATCH that only changes a description will still ask for
   confirmation; that is the deliberate cost of not guessing.
 - **A writable approval store.** An approval record is a file. Anyone who can write it can
   rewrite the record and its digest together. Keep it where only the owner writes.
+- **A packet-path race.** `write_packet` refuses an existing packet before the child runs, but
+  Open-Ready's writer is not an exclusive create, so a second process that can write that
+  directory could replace the file between the check and the write. On a single-user host the
+  window is narrow and the writer is the same user; on a shared workspace it is a real hole.
 - **Anything after the fact.** The guard refuses a command; it does not audit what happened
   outside Hermes.
 
@@ -140,9 +190,13 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **169 passed** — grammar table (67 publish shapes, 38 non-publish shapes),
+- `pytest`: **188 passed** — grammar table (67 publish shapes, 38 non-publish shapes),
   decision table, runner failure modes (including a grandchild holding the pipe open),
-  settings precedence, tool envelopes, evidence lookup.
+  settings precedence, tool envelopes, evidence lookup, the child environment (allowlisted,
+  and the default for every child), and the write policy: no caller-named path, the packet's
+  fixed location, and its refusals on a parent that only looks like a project, a missing
+  candidate, a symlinked or dangling destination, an existing file, and a non-boolean
+  `write_packet`.
 - `hermes plugins validate`: every check green, including `capability probe`
   (`register() ran in isolation`), `declared tools`, `declared hooks`, `security scan`,
   and `no core override`.
@@ -162,12 +216,13 @@ plugin.yaml              manifest: tools, hooks, config schema
 __init__.py              entry point; imports register() only
 openready_plugin/
   settings.py            env > config.yaml > defaults; problems reported
+  childenv.py            the allowlisted environment every child process gets
   runner.py              bounded subprocess; never raises, never hangs
   publish.py             pure grammar + decision table
   evidence.py            read-only approval lookup
   tools.py               tool schemas and handlers
   hook.py                the publish guard
-tests/                   169 tests, no network, no real CLI required
+tests/                   188 tests, no network, no real CLI required
 docs/RESEARCH.md         why each decision was made, with source handles
 ```
 

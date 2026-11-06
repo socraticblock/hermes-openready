@@ -21,6 +21,12 @@ from typing import Any
 PLUGIN_ID = "hermes-openready"
 ENV_PREFIX = "HERMES_OPENREADY_"
 
+#: Open-Ready fixes this name: `export()` accepts exactly one in-project location,
+#: ``<root>/.openready-candidate``, and refuses every other in-project path. The
+#: setting below exists only so an old config does not fail to parse; a value other
+#: than this is reported and ignored, because the CLI would refuse it anyway.
+CANDIDATE_DIRNAME = ".openready-candidate"
+
 DEFAULTS: dict[str, Any] = {
     "openready_bin": "openready",
     "openready_python": "python3",
@@ -144,5 +150,15 @@ def load() -> Settings:
         else:
             parsed_text = _as_text(key, raw, problems, allow_empty=(key == "destination"))
             values[key] = default if parsed_text is None else parsed_text
+
+    if values["candidate_dir"] != CANDIDATE_DIRNAME:
+        # Not silently overridden: the disagreement is surfaced, then resolved the
+        # only way Open-Ready allows. A tool that used the configured value would
+        # write a directory the CLI then refuses to export into.
+        problems.append(
+            f"candidate_dir: {values['candidate_dir']!r} is not supported; Open-Ready fixes the "
+            f"candidate directory at {CANDIDATE_DIRNAME!r}. Using {CANDIDATE_DIRNAME!r}."
+        )
+        values["candidate_dir"] = CANDIDATE_DIRNAME
 
     return Settings(problems=tuple(problems), **values)

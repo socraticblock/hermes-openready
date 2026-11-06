@@ -14,14 +14,13 @@ Exit codes are Open-Ready's closed vocabulary (``status.py``): 0 ok, 1 fail,
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import runner
+from . import childenv, runner
 from .settings import Settings
 
 APPROVED = "approved"
@@ -42,15 +41,14 @@ class Evidence:
         return self.status == APPROVED
 
 
-#: Credentials the publisher never needs. A guard that asks "is this approved?"
-#: must not hand the checked repository's code a token it could publish with.
-_CREDENTIAL_VARS = frozenset({
-    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-})
-
-
 def _child_env() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in _CREDENTIAL_VARS}
+    """The minimal environment the approval check runs with.
+
+    Delegated to :func:`openready_plugin.childenv.minimal` so the rule is one
+    allowlist shared with every other child this plugin starts: no provider
+    keys, no GitHub tokens, nothing that could publish what was just judged.
+    """
+    return childenv.minimal()
 
 
 def _publisher_argv(settings: Settings, candidate: Path, destination: str, licence: str) -> list[str]:

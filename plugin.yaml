@@ -3,9 +3,11 @@ version: "0.1.0"
 description: >
   Open-Ready as Hermes tools: prepare an open-source release candidate from a private
   repository, verify it, and refuse to publish it. Registers five tools that only read or
-  produce a candidate, plus a pre_tool_call guard that blocks or escalates repository
-  visibility changes until the owner has approved that exact candidate digest. The plugin
-  has no publish path of its own.
+  produce a candidate, plus a pre_tool_call guard that inspects terminal commands and
+  blocks or escalates the recognised ones (gh, gh api, curl) that would change a
+  repository's visibility or create a public repository, until the owner has approved that
+  exact candidate digest. The guard does not claim to catch every way to publish. The
+  plugin has no publish path of its own.
 author: Socraticblock
 license: MIT
 requires_hermes: ">=0.20"
@@ -37,7 +39,7 @@ config_schema:
   candidate_dir:
     type: str
     required: false
-    description: "Candidate directory relative to the repository (default: .openready-candidate)."
+    description: "Accepted for compatibility and reported if set: Open-Ready fixes the candidate directory at .openready-candidate, and any other value is ignored."
   licence:
     type: str
     required: false
