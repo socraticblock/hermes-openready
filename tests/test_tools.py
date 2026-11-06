@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -198,6 +201,22 @@ def test_candidate_uses_the_cli_default_when_no_out_is_given(tmp_path, monkeypat
     assert "--out" not in calls[0][0][0]
 
 
+def test_candidate_refuses_symlinked_default_export_before_cli(tmp_path, monkeypatch):
+    """The CLI resolves a symlinked default into an external --out unless refused."""
+    repo = _project(tmp_path)
+    (repo / ".openready-candidate").rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / ".openready-candidate").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(tools.settings, "load", lambda: _settings())
+    calls = _no_run(monkeypatch)
+    payload = json.loads(tools.handle_candidate({"path": str(repo)}))
+    assert payload["ok"] is False
+    assert "symbolic link" in payload["error"]
+    assert calls == []
+    assert list(outside.iterdir()) == []
+
+
 def test_verify_refuses_a_legacy_packet_argument_without_running_the_cli(tmp_path, monkeypatch):
     repo = _project(tmp_path)
     monkeypatch.setattr(tools.settings, "load", lambda: _settings())
@@ -225,11 +244,32 @@ def test_write_packet_goes_to_the_fixed_path_inside_a_real_project_root(tmp_path
     calls = _no_run(monkeypatch)
     payload = json.loads(tools.handle_verify(
         {"candidate": str(repo / ".openready-candidate"), "write_packet": True}))
-    expected = repo / ".openready" / "packets" / "packet.json"
+    expected = repo / ".openready-private" / "packets" / "packet.json"
     argv = calls[0][0][0]
     assert argv[argv.index("--packet") + 1] == str(expected)
-    assert payload["packet_path"] == str(expected)
+    assert payload["packet_target"] == str(expected)
+    assert payload["packet_written"] is False
+    assert "packet_path" not in payload
     assert expected.parent.is_dir()
+
+
+def test_packet_written_is_reported_only_after_cli_creates_it(tmp_path, monkeypatch):
+    repo = _project(tmp_path)
+    monkeypatch.setattr(tools.settings, "load", lambda: _settings())
+
+    def fake_verify(argv, **kwargs):
+        packet = Path(argv[argv.index("--packet") + 1])
+        packet.write_text('{"status": "REVIEW_REQUIRED"}')
+        return _result(3, '{"command": "verify"}')
+
+    monkeypatch.setattr(tools.runner, "run", fake_verify)
+    payload = json.loads(tools.handle_verify(
+        {"candidate": str(repo / ".openready-candidate"), "write_packet": True}))
+    expected = repo / ".openready-private" / "packets" / "packet.json"
+    assert payload["status"] == "NOT_RUN"
+    assert payload["packet_written"] is True
+    assert payload["packet_path"] == str(expected)
+    assert expected.is_file()
 
 
 def test_write_packet_refuses_a_parent_that_is_only_named_like_a_repository(tmp_path, monkeypatch):
@@ -274,7 +314,7 @@ def test_write_packet_refuses_a_dangling_packet_symlink(tmp_path, monkeypatch):
     """`exists()` is False for a dangling symlink; the check must not rely on it."""
     repo = _project(tmp_path)
     outside = tmp_path / "outside" / "created-by-the-writer.txt"
-    packets = repo / ".openready" / "packets"
+    packets = repo / ".openready-private" / "packets"
     packets.mkdir(parents=True)
     (packets / "packet.json").symlink_to(outside)
     monkeypatch.setattr(tools.settings, "load", lambda: _settings())
@@ -288,7 +328,7 @@ def test_write_packet_refuses_a_dangling_packet_symlink(tmp_path, monkeypatch):
 
 def test_write_packet_refuses_to_overwrite_an_existing_packet(tmp_path, monkeypatch):
     repo = _project(tmp_path)
-    existing = repo / ".openready" / "packets" / "packet.json"
+    existing = repo / ".openready-private" / "packets" / "packet.json"
     existing.parent.mkdir(parents=True)
     existing.write_text("{}")
     monkeypatch.setattr(tools.settings, "load", lambda: _settings())
@@ -310,3 +350,23 @@ def test_write_packet_rejects_a_truthy_string(tmp_path, monkeypatch):
     assert payload["ok"] is False
     assert "must be a boolean" in payload["error"]
     assert calls == []
+
+
+def test_packet_is_not_exportable_even_if_git_tracked(tmp_path):
+    """Check the real optional Open-Ready export plan; never mock its policy."""
+    candidate_module = pytest.importorskip("openready.candidate")
+    if shutil.which("git") is None:
+        pytest.skip("git is unavailable")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    packet = repo / ".openready-private" / "packets" / "packet.json"
+    packet.parent.mkdir(parents=True)
+    packet.write_text('{"status": "REVIEW_REQUIRED"}')
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-f",
+                    packet.relative_to(repo).as_posix()],
+                   check=True, capture_output=True)
+    planned = candidate_module.plan(repo, repo.name)
+    relative = packet.relative_to(repo).as_posix()
+    assert relative not in planned["included"]
+    assert any(row["path"] == relative for row in planned["excluded"])
