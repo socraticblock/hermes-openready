@@ -299,7 +299,7 @@ def test_write_packet_refuses_a_symlinked_destination_directory(tmp_path, monkey
     repo = _project(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (repo / ".openready").symlink_to(elsewhere, target_is_directory=True)
+    (repo / ".openready-private").symlink_to(elsewhere, target_is_directory=True)
     monkeypatch.setattr(tools.settings, "load", lambda: _settings())
     calls = _no_run(monkeypatch)
     payload = json.loads(tools.handle_verify(
