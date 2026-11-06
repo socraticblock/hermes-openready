@@ -64,7 +64,7 @@ Malformed values are reported in tool output and in guard messages, never silent
 - `openready_candidate` — export an **unapproved** candidate. Writes only the candidate
   directory.
 - `openready_verify` — verify a frozen candidate and emit its unapproved release packet. With
-  `write_packet: true` it also writes the packet to `<repo>/.openready/packets/packet.json`.
+  `write_packet: true` it also writes the packet to `<repo>/.openready-private/packets/packet.json`.
 - `openready_gate` — read-only: what would the guard decide for this destination now?
 
 Every tool result carries `"publication": "NOT_APPROVED"` and the note that exit 0 never
@@ -73,9 +73,9 @@ means safe to publish. Open-Ready's exit codes are preserved verbatim: `0` OK, `
 
 ## Where the plugin is allowed to write
 
-No tool argument names a place to write. A model-supplied path is an arbitrary-write
-primitive: a tool call could put files anywhere the host user can write, and checking that
-the path is "inside something" only relocates the problem to whatever the caller named.
+No tool argument names a separate output path. The source repository remains a
+caller-supplied input, not a sandbox; the Open-Ready CLI validates project exports,
+and the wrapper fixes the packet destination relative to the validated project.
 
 **The candidate.** `openready_candidate` takes no `out`. Open-Ready's own contract decides
 this: a candidate must be a separate tree, and the only in-project location it permits is its
@@ -85,15 +85,22 @@ CLI `0.1.0-p0`: `--out <repo>/export/cand` exits 1 with `candidate.destination`,
 the project; a candidate must be a separate tree, and the only in-project location permitted
 is .openready-candidate/". A re-export over an existing default directory also fails there,
 with "destination must be absent or an empty directory" — the plugin does not paper over it.
+The wrapper refuses a symlink at the default candidate output, including a dangling
+link, because the CLI would otherwise resolve it to an out-of-tree destination.
 
 **The packet.** `openready_verify` takes no `packet` path; it takes `write_packet: true`, and
-the plugin writes to `<repo>/.openready/packets/packet.json`, a name it chooses. It refuses if
-that file already exists, and it refuses entirely when the candidate is not the directory this
-plugin's export writes, because then there is no repository to derive — the answer is no
-rather than a guess. The path is never inside the candidate: a packet written there would
-mutate the frozen tree that was just digested. `write_packet` exists because the packet is
-about 15 KB and a tool result is bounded at 12 KB, so the on-disk copy is the one a reviewer
-can actually read.
+the plugin writes to `<repo>/.openready-private/packets/packet.json`, a name it chooses.
+Open-Ready's generated Git ignore rules exclude this private-state directory, and its
+export path policy rejects it even if the packet is forcibly Git-tracked. This is
+defense in depth, not a claim that Git ignore is a security boundary. Existing packet
+files, symlinks in the packet path and candidates without a validated project marker
+are refused; the packet cannot be written inside the frozen candidate.
+
+An actual verify *tool response* measured 12,499 characters against the plugin's
+12,000-character structured-result bound; its packet file was 5,542 bytes.
+When requested, the envelope returns `packet_target`, and includes `packet_path` and
+`packet_written: true` only when a regular file exists after the CLI runs.
+This is an existence check, not proof that its contents are correct.
 
 If you need a candidate somewhere else, or a packet somewhere else, run the CLI:
 `openready candidate --path <repo> --out <tree>` and `openready verify --candidate <dir>
@@ -190,7 +197,7 @@ Stated plainly, because a guard that oversells itself is worse than none:
 
 Verified on this host (Open-Ready `0.1.0-p0`, Python 3.14.9):
 
-- `pytest`: **188 passed** — grammar table (67 publish shapes, 38 non-publish shapes),
+- `pytest`: **188 passed on the previous reviewed commit** — grammar table (67 publish shapes, 38 non-publish shapes),
   decision table, runner failure modes (including a grandchild holding the pipe open),
   settings precedence, tool envelopes, evidence lookup, the child environment (allowlisted,
   and the default for every child), and the write policy: no caller-named path, the packet's
@@ -222,7 +229,7 @@ openready_plugin/
   evidence.py            read-only approval lookup
   tools.py               tool schemas and handlers
   hook.py                the publish guard
-tests/                   188 tests, no network, no real CLI required
+tests/                   unit tests and one optional real-CLI export-plan check
 docs/RESEARCH.md         why each decision was made, with source handles
 ```
 
