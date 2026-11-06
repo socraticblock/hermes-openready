@@ -441,10 +441,11 @@ TOOLS = (
             {
                 "candidate": {"type": "string", "description": "Path to the candidate directory."},
                 "write_packet": {"type": "boolean",
-                                 "description": "Write the release packet to <repo>/.openready/packets/"
-                                                "packet.json inside the repository. The caller never "
-                                                "supplies a path. Default false (packet returned in "
-                                                "this result, bounded)."},
+                                 "description": "Write the release packet to "
+                                                "<repo>/.openready-private/packets/packet.json, inside "
+                                                "a validated project root and outside the candidate. "
+                                                "The caller never supplies a path. Default false "
+                                                "(packet returned in this result, bounded)."},
                 "expected_digest": {"type": "string",
                                     "description": "Digest recorded when the artifact was reviewed."},
             },

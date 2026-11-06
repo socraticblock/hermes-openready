@@ -370,3 +370,11 @@ def test_packet_is_not_exportable_even_if_git_tracked(tmp_path):
     relative = packet.relative_to(repo).as_posix()
     assert relative not in planned["included"]
     assert any(row["path"] == relative for row in planned["excluded"])
+
+
+def test_the_write_packet_description_names_the_real_destination():
+    """A model-facing description pointing at the old location is a factual error."""
+    props = _schema_for("openready_verify")["parameters"]["properties"]
+    description = props["write_packet"]["description"]
+    assert Path(*tools.PACKET_RELPATH).as_posix() in description
+    assert "<repo>/.openready/packets" not in description
